@@ -27,6 +27,6 @@ jobs:
           body: |
             Hello @${{ github.event.client_payload.github.actor }}!
 
-            [Click here to see the command runn output][1]
+            [Click here to see the command run output][1]
 
             [1]: ${{ steps.vars.outputs.run-url }}
