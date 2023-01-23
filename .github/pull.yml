@@ -1,7 +1,8 @@
+
 version: "1"
 rules:                      # Array of rules
   - base: upstream           # Required. Target branch
-    upstream: hashicorp:master    # Required. Must be in the same fork network.
+    upstream: hashicorp:main    # Required. Must be in the same fork network.
     mergeMethod: hardreset  # Optional, one of [none, merge, squash, rebase, hardreset], Default: none.
     mergeUnstable: false    # Optional, merge pull request even when the mergeable_state is not clean. Default: false
   - base: master
