@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/hashicorp/terraform/addrs"
+	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/getproviders"
 )
 
@@ -58,12 +58,18 @@ func NewDir(baseDir string) *Dir {
 // running.
 //
 // This is primarily intended for portable unit testing and not particularly
-// useful in "real" callers, with the exception of terraform-bundle.
+// useful in "real" callers.
 func NewDirWithPlatform(baseDir string, platform getproviders.Platform) *Dir {
 	return &Dir{
 		baseDir:        baseDir,
 		targetPlatform: platform,
 	}
+}
+
+// BasePath returns the filesystem path of the base directory of this
+// cache directory.
+func (d *Dir) BasePath() string {
+	return filepath.Clean(d.baseDir)
 }
 
 // AllAvailablePackages returns a description of all of the packages already

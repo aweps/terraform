@@ -2,30 +2,28 @@ package providercache
 
 import (
 	"context"
-	"io/ioutil"
-	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/apparentlymart/go-versions/versions"
 	"github.com/google/go-cmp/cmp"
 
-	"github.com/hashicorp/terraform/addrs"
+	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/getproviders"
 )
 
 func TestInstallPackage(t *testing.T) {
-	tmpDirPath, err := ioutil.TempDir("", "terraform-test-providercache")
+	tmpDirPath, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDirPath)
 
 	linuxPlatform := getproviders.Platform{
 		OS:   "linux",
 		Arch: "amd64",
 	}
 	nullProvider := addrs.NewProvider(
-		addrs.DefaultRegistryHost, "hashicorp", "null",
+		addrs.DefaultProviderRegistryHost, "hashicorp", "null",
 	)
 
 	tmpDir := NewDirWithPlatform(tmpDirPath, linuxPlatform)
@@ -41,7 +39,7 @@ func TestInstallPackage(t *testing.T) {
 		Location: getproviders.PackageLocalArchive("testdata/terraform-provider-null_2.1.0_linux_amd64.zip"),
 	}
 
-	result, err := tmpDir.InstallPackage(context.TODO(), meta)
+	result, err := tmpDir.InstallPackage(context.TODO(), meta, nil)
 	if err != nil {
 		t.Fatalf("InstallPackage failed: %s", err)
 	}
@@ -69,18 +67,17 @@ func TestInstallPackage(t *testing.T) {
 
 func TestLinkFromOtherCache(t *testing.T) {
 	srcDirPath := "testdata/cachedir"
-	tmpDirPath, err := ioutil.TempDir("", "terraform-test-providercache")
+	tmpDirPath, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(tmpDirPath)
 
 	windowsPlatform := getproviders.Platform{
 		OS:   "windows",
 		Arch: "amd64",
 	}
 	nullProvider := addrs.NewProvider(
-		addrs.DefaultRegistryHost, "hashicorp", "null",
+		addrs.DefaultProviderRegistryHost, "hashicorp", "null",
 	)
 
 	srcDir := NewDirWithPlatform(srcDirPath, windowsPlatform)
@@ -120,7 +117,7 @@ func TestLinkFromOtherCache(t *testing.T) {
 		t.Fatalf("null provider has no latest version in source directory")
 	}
 
-	err = tmpDir.LinkFromOtherCache(cacheEntry)
+	err = tmpDir.LinkFromOtherCache(cacheEntry, nil)
 	if err != nil {
 		t.Fatalf("LinkFromOtherCache failed: %s", err)
 	}
