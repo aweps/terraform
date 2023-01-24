@@ -1,4 +1,4 @@
-name: Docker
+name: Dependency Dispatch
 
 on:
   push:
