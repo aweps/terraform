@@ -1,8 +1,6 @@
 # Contributing to Terraform
 
-This repository contains only Terraform core, which includes the command line interface and the main graph engine. Providers are implemented as plugins that each have their own repository in [the `terraform-providers` organization](https://github.com/terraform-providers) on GitHub. Instructions for developing each provider are in the associated README file. For more information, see [the provider development overview](https://www.terraform.io/docs/plugins/provider.html).
-
----
+This repository contains only Terraform core, which includes the command line interface and the main graph engine. Providers are implemented as plugins that each have their own repository linked from the [Terraform Registry index](https://registry.terraform.io/browse/providers). Instructions for developing each provider are usually in the associated README file. For more information, see [the provider development overview](https://www.terraform.io/docs/plugins/provider.html).
 
 **All communication on GitHub, the community forum, and other HashiCorp-provided communication channels is subject to [the HashiCorp community guidelines](https://www.hashicorp.com/community-guidelines).**
 
@@ -62,15 +60,17 @@ There are some areas of Terraform which are of special concern to the Terraform 
 
 The Terraform team is not merging PRs for new state storage backends at the current time. Our priority regarding state storage backends is to find maintainers for existing backends and remove those backends without maintainers.
 
-Please see the [CODEOWNERS](https://github.com/hashicorp/terraform/blob/master/CODEOWNERS) file for the status of a given backend. Community members with an interest in a particular standard backend are welcome to help maintain it.
+Please see the [CODEOWNERS](https://github.com/hashicorp/terraform/blob/main/CODEOWNERS) file for the status of a given backend. Community members with an interest in a particular standard backend are welcome to help maintain it.
 
-Currently, merging state storage backends places a significant burden on the Terraform team. The team must setup an environment and cloud service provider account, or a new database/storage/key-value service, in order to build and test remote state storage backends. The time and complexity of doing so prevents us from moving Terraform forward in other ways.
+Currently, merging state storage backends places a significant burden on the Terraform team. The team must set up an environment and cloud service provider account, or a new database/storage/key-value service, in order to build and test remote state storage backends. The time and complexity of doing so prevents us from moving Terraform forward in other ways.
 
 We are working to remove ourselves from the critical path of state storage backends by moving them towards a plugin model. In the meantime, we won't be accepting new remote state backends into Terraform.
 
 #### Provisioners
 
-Provisioners are an area of concern in Terraform for a number of reasons. Chiefly, they are often used in the place of configuration management tools or custom providers.
+Provisioners are an area of concern in Terraform for a number of reasons. Chiefly, they are often used in the place of configuration management tools or custom providers. 
+
+There are two main types of provisioners in Terraform, the generic provisioners (`file`,`local-exec`, and `remote-exec`) and the tool-specific provisioners (`chef`, `habbitat`, `puppet` & `salt-masterless`). **The tool-specific provisioners [are deprecated](https://discuss.hashicorp.com/t/notice-terraform-to-begin-deprecation-of-vendor-tool-specific-provisioners-starting-in-terraform-0-13-4/13997).** In practice this means we will not be accepting PRs for these areas of the codebase. 
 
 From our [documentation](https://www.terraform.io/docs/provisioners/index.html):
 
@@ -78,17 +78,17 @@ From our [documentation](https://www.terraform.io/docs/provisioners/index.html):
 
 The Terraform team is in the process of building a way forward which continues to decrease reliance on provisioners. In the mean time however, as our documentation indicates, they are a tool of last resort. As such expect that PRs and issues for provisioners are not high in priority. 
 
-Please see the [CODEOWNERS](https://github.com/hashicorp/terraform/blob/master/CODEOWNERS) file for the status of a given provisioner. Community members with an interest in a particular provisioner are welcome to help maintain it.
+Please see the [CODEOWNERS](https://github.com/hashicorp/terraform/blob/main/CODEOWNERS) file for the status of a given provisioner. Community members with an interest in a particular provisioner are welcome to help maintain it.
 
 #### Maintainers
 
 Maintainers are key contributors to our Open Source project. They contribute their time and expertise and we ask that the community take extra special care to be mindful of this when interacting with them.
 
-For code that has a listed maintainer or maintainers in our [CODEOWNERS](https://github.com/hashicorp/terraform/blob/master/CODEOWNERS) file, the Terraform team will highlight them for participation in PRs which relate to the area of code they maintain. The expectation is that a maintainer will review the code and work with the PR contributor before the code is merged by the Terraform team.
+For code that has a listed maintainer or maintainers in our [CODEOWNERS](https://github.com/hashicorp/terraform/blob/main/CODEOWNERS) file, the Terraform team will highlight them for participation in PRs which relate to the area of code they maintain. The expectation is that a maintainer will review the code and work with the PR contributor before the code is merged by the Terraform team.
 
 There is no expectation on response time for our maintainers; they may be indisposed for prolonged periods of time. Please be patient. Discussions on when code becomes "unmaintained" will be on a case-by-case basis. 
 
-If an an unmaintained area of code interests you and you'd like to become a maintainer, you may simply make a PR against our [CODEOWNERS](https://github.com/hashicorp/terraform/blob/master/CODEOWNERS) file with your github handle attached to the approriate area. If there is a maintainer or team of maintainers for that area, please coordinate with them as necessary. 
+If an an unmaintained area of code interests you and you'd like to become a maintainer, you may simply make a PR against our [CODEOWNERS](https://github.com/hashicorp/terraform/blob/main/CODEOWNERS) file with your github handle attached to the approriate area. If there is a maintainer or team of maintainers for that area, please coordinate with them as necessary. 
 
 ### Pull Request Lifecycle
 
@@ -96,7 +96,7 @@ If an an unmaintained area of code interests you and you'd like to become a main
 2. Once you believe your pull request is ready to be merged you can create your pull request.
 3. When time permits Terraform's core team members will look over your contribution and either merge, or provide comments letting you know if there is anything left to do. It may take some time for us to respond. We may also have questions that we need answered about the code, either because something doesn't make sense to us or because we want to understand your thought process. We kindly ask that you do not target specific team members. 
 4. If we have requested changes, you can either make those changes or, if you disagree with the suggested changes, we can have a conversation about our reasoning and agree on a path forward. This may be a multi-step process. Our view is that pull requests are a chance to collaborate, and we welcome conversations about how to do things better. It is the contributor's responsibility to address any changes requested. While reviewers are happy to give guidance, it is unsustainable for us to perform the coding work necessary to get a PR into a mergeable state.
-5. Once all outstanding comments and checklist items have been addressed, your contribution will be merged! Merged PRs may or may not be included in the next release based on changes the Terraform teams deems as breaking or not. The core team takes care of updating the [CHANGELOG.md](https://github.com/hashicorp/terraform/blob/master/CHANGELOG.md) as they merge.
+5. Once all outstanding comments and checklist items have been addressed, your contribution will be merged! Merged PRs may or may not be included in the next release based on changes the Terraform teams deems as breaking or not. The core team takes care of updating the [CHANGELOG.md](https://github.com/hashicorp/terraform/blob/main/CHANGELOG.md) as they merge.
 6. In some cases, we might decide that a PR should be closed without merging. We'll make sure to provide clear reasoning when this happens. Following the recommended process above is one of the ways to ensure you don't spend time on a PR we can't or won't merge.
 
 #### Getting Your Pull Requests Merged Faster
@@ -117,9 +117,6 @@ The following checks run when a PR is opened:
 
 - Contributor License Agreement (CLA): If this is your first contribution to Terraform you will be asked to sign the CLA.
 - Tests: tests include unit tests and acceptance tests, and all tests must pass before a PR can be merged.
-- Test Coverage Report: We use [codecov](https://codecov.io/) to check both overall test coverage, and patch coverage.
-
--> **Note:** We are still deciding on the right targets for our code coverage check. A failure in `codecov` does not necessarily mean that your PR will not be approved or merged.
 
 ----
 
@@ -127,7 +124,9 @@ The following checks run when a PR is opened:
 
 This repository contains the source code for Terraform CLI, which is the main component of Terraform that contains the core Terraform engine.
 
-The HashiCorp-maintained Terraform providers are also open source but are not in this repository; instead, they are each in their own repository in [the `terraform-providers` organization](https://github.com/terraform-providers) on GitHub.
+Terraform providers are not maintained in this repository; you can find relevant
+repository and relevant issue tracker for each provider within the
+[Terraform Registry index](https://registry.terraform.io/browse/providers).
 
 This repository also does not include the source code for some other parts of the Terraform product including Terraform Cloud, Terraform Enterprise, and the Terraform Registry. Those components are not open source, though if you have feedback about them (including bug reports) please do feel free to [open a GitHub issue on this repository](https://github.com/hashicorp/terraform/issues/new/choose).
 
@@ -137,7 +136,7 @@ If you wish to work on the Terraform CLI source code, you'll first need to insta
 
 At this time the Terraform development environment is targeting only Linux and Mac OS X systems. While Terraform itself is compatible with Windows, unfortunately the unit test suite currently contains Unix-specific assumptions around maximum path lengths, path separators, etc.
 
-Refer to the file [`.go-version`](https://github.com/hashicorp/terraform/blob/master/.go-version) to see which version of Go Terraform is currently built with. Other versions will often work, but if you run into any build or testing problems please try with the specific Go version indicated. You can optionally simplify the installation of multiple specific versions of Go on your system by installing [`goenv`](https://github.com/syndbg/goenv), which reads `.go-version` and automatically selects the correct Go version.
+Refer to the file [`.go-version`](https://github.com/hashicorp/terraform/blob/main/.go-version) to see which version of Go Terraform is currently built with. Other versions will often work, but if you run into any build or testing problems please try with the specific Go version indicated. You can optionally simplify the installation of multiple specific versions of Go on your system by installing [`goenv`](https://github.com/syndbg/goenv), which reads `.go-version` and automatically selects the correct Go version.
 
 Use Git to clone this repository into a location of your choice. Terraform is using [Go Modules](https://blog.golang.org/using-go-modules), and so you should *not* clone it inside your `GOPATH`.
 
@@ -165,8 +164,8 @@ go test ./...
 As you make your changes, you can re-run the above command to ensure that the tests are *still* passing. If you are working only on a specific Go package, you can speed up your testing cycle by testing only that single package, or packages under a particular package prefix:
 
 ```
-go test ./command/...
-go test ./addrs
+go test ./internal/command/...
+go test ./internal/addrs
 ```
 
 ## Acceptance Tests: Testing interactions with external services
@@ -201,7 +200,7 @@ make protobuf
 
 ## External Dependencies
 
-Terraform uses Go Modules for dependency management, but currently uses "vendoring" to include copies of all of the external library dependencies in the Terraform repository to allow builds to complete even if third-party dependency sources are unavailable.
+Terraform uses Go Modules for dependency management.
 
 Our dependency licensing policy for Terraform excludes proprietary licenses and "copyleft"-style licenses. We accept the common Mozilla Public License v2, MIT License, and BSD licenses. We will consider other open source licenses in similar spirit to those three, but if you plan to include such a dependency in a contribution we'd recommend opening a GitHub issue first to discuss what you intend to implement and what dependencies it will require so that the Terraform team can review the relevant licenses to for whether they meet our licensing needs.
 
@@ -213,24 +212,23 @@ go get github.com/hashicorp/hcl/v2@2.0.0
 
 This command will download the requested version (2.0.0 in the above example) and record that version selection in the `go.mod` file. It will also record checksums for the module in the `go.sum`.
 
-To complete the dependency change, clean up any redundancy in the module metadata files and resynchronize the `vendor` directory with the new package selections by running the following commands:
+To complete the dependency change, clean up any redundancy in the module metadata files by running:
 
 ```
 go mod tidy
-go mod vendor
 ```
 
-To ensure that the vendoring has worked correctly, be sure to run the unit test suite at least once in *vendoring* mode, where Go will use the vendored dependencies to build the test programs:
+To ensure that the upgrade has worked correctly, be sure to run the unit test suite at least once:
 
 ```
-go test -mod=vendor ./...
+go test ./...
 ```
 
 Because dependency changes affect a shared, top-level file, they are more likely than some other change types to become conflicted with other proposed changes during the code review process. For that reason, and to make dependency changes more visible in the change history, we prefer to record dependency changes as separate commits that include only the results of the above commands and the minimal set of changes to Terraform's own code for compatibility with the new version:
 
 ```
-git add go.mod go.sum vendor
-git commit -m "vendor: go get github.com/hashicorp/hcl/v2@2.0.0"
+git add go.mod go.sum
+git commit -m "go get github.com/hashicorp/hcl/v2@2.0.0"
 ```
 
 You can then make use of the new or updated dependency in new code added in subsequent commits.

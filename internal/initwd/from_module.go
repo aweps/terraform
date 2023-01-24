@@ -1,6 +1,7 @@
 package initwd
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -9,14 +10,15 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hashicorp/terraform/internal/copy"
 	"github.com/hashicorp/terraform/internal/earlyconfig"
+	"github.com/hashicorp/terraform/internal/getmodules"
 
 	version "github.com/hashicorp/go-version"
 	"github.com/hashicorp/terraform-config-inspect/tfconfig"
-	"github.com/hashicorp/terraform/internal/copydir"
 	"github.com/hashicorp/terraform/internal/modsdir"
-	"github.com/hashicorp/terraform/registry"
-	"github.com/hashicorp/terraform/tfdiags"
+	"github.com/hashicorp/terraform/internal/registry"
+	"github.com/hashicorp/terraform/internal/tfdiags"
 )
 
 const initFromModuleRootCallName = "root"
@@ -40,7 +42,7 @@ const initFromModuleRootKeyPrefix = initFromModuleRootCallName + "."
 // references using ../ from that module to be unresolvable. Error diagnostics
 // are produced in that case, to prompt the user to rewrite the source strings
 // to be absolute references to the original remote module.
-func DirFromModule(rootDir, modulesDir, sourceAddr string, reg *registry.Client, hooks ModuleInstallHooks) tfdiags.Diagnostics {
+func DirFromModule(ctx context.Context, rootDir, modulesDir, sourceAddr string, reg *registry.Client, hooks ModuleInstallHooks) tfdiags.Diagnostics {
 	var diags tfdiags.Diagnostics
 
 	// The way this function works is pretty ugly, but we accept it because
@@ -142,8 +144,8 @@ func DirFromModule(rootDir, modulesDir, sourceAddr string, reg *registry.Client,
 	wrapHooks := installHooksInitDir{
 		Wrapped: hooks,
 	}
-	getter := reusingGetter{}
-	_, instDiags := inst.installDescendentModules(fakeRootModule, rootDir, instManifest, true, wrapHooks, getter)
+	fetcher := getmodules.NewPackageFetcher()
+	_, instDiags := inst.installDescendentModules(ctx, fakeRootModule, rootDir, instManifest, true, wrapHooks, fetcher)
 	diags = append(diags, instDiags...)
 	if instDiags.HasErrors() {
 		return diags
@@ -174,7 +176,7 @@ func DirFromModule(rootDir, modulesDir, sourceAddr string, reg *registry.Client,
 			// We've found the module the user requested, which we must
 			// now copy into rootDir so it can be used directly.
 			log.Printf("[TRACE] copying new root module from %s to %s", record.Dir, rootDir)
-			err := copydir.CopyDir(rootDir, record.Dir)
+			err := copy.CopyDir(rootDir, record.Dir)
 			if err != nil {
 				diags = diags.Append(tfdiags.Sourceless(
 					tfdiags.Error,
@@ -193,7 +195,7 @@ func DirFromModule(rootDir, modulesDir, sourceAddr string, reg *registry.Client,
 			if mod != nil {
 				for _, mc := range mod.ModuleCalls {
 					if pathTraversesUp(mc.Source) {
-						packageAddr, givenSubdir := splitAddrSubdir(sourceAddr)
+						packageAddr, givenSubdir := getmodules.SplitPackageSubdir(sourceAddr)
 						newSubdir := filepath.Join(givenSubdir, mc.Source)
 						if pathTraversesUp(newSubdir) {
 							// This should never happen in any reasonable
@@ -325,7 +327,7 @@ func DirFromModule(rootDir, modulesDir, sourceAddr string, reg *registry.Client,
 		// We copy rather than "rename" here because renaming between directories
 		// can be tricky in edge-cases like network filesystems, etc.
 		log.Printf("[TRACE] copying new module %s from %s to %s", newKey, record.Dir, instPath)
-		err := copydir.CopyDir(instPath, tempPath)
+		err := copy.CopyDir(instPath, tempPath)
 		if err != nil {
 			diags = diags.Append(tfdiags.Sourceless(
 				tfdiags.Error,
