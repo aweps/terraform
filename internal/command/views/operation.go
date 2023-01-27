@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package views
 
 import (
@@ -96,8 +99,9 @@ func (v *OperationHuman) Plan(plan *plans.Plan, schemas *terraform.Schemas) {
 	}
 
 	renderer := jsonformat.Renderer{
-		Colorize: v.view.colorize,
-		Streams:  v.view.streams,
+		Colorize:            v.view.colorize,
+		Streams:             v.view.streams,
+		RunningInAutomation: v.inAutomation,
 	}
 
 	jplan := jsonformat.Plan{
@@ -111,7 +115,7 @@ func (v *OperationHuman) Plan(plan *plans.Plan, schemas *terraform.Schemas) {
 	}
 
 	// Side load some data that we can't extract from the JSON plan.
-	var opts []jsonformat.RendererOpt
+	var opts []jsonformat.PlanRendererOpt
 	if !plan.CanApply() {
 		opts = append(opts, jsonformat.CanNotApply)
 	}
@@ -211,6 +215,11 @@ func (v *OperationJSON) Plan(plan *plans.Plan, schemas *terraform.Schemas) {
 			// Avoid rendering data sources on deletion
 			continue
 		}
+
+		if change.Importing != nil {
+			cs.Import++
+		}
+
 		switch change.Action {
 		case plans.Create:
 			cs.Add++
@@ -223,7 +232,7 @@ func (v *OperationJSON) Plan(plan *plans.Plan, schemas *terraform.Schemas) {
 			cs.Remove++
 		}
 
-		if change.Action != plans.NoOp || !change.Addr.Equal(change.PrevRunAddr) {
+		if change.Action != plans.NoOp || !change.Addr.Equal(change.PrevRunAddr) || change.Importing != nil {
 			v.view.PlannedChange(json.NewResourceInstanceChange(change))
 		}
 	}

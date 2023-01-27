@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package cloud
 
 import (
@@ -249,4 +252,24 @@ func TestDelete_SafeDelete(t *testing.T) {
 	if workspace != nil || err != tfe.ErrResourceNotFound {
 		t.Fatalf("workspace %s not deleted", workspaceId)
 	}
+}
+
+func TestState_PersistState(t *testing.T) {
+	cloudState := testCloudState(t)
+
+	t.Run("Initial PersistState", func(t *testing.T) {
+		if cloudState.readState != nil {
+			t.Fatal("expected nil initial readState")
+		}
+
+		err := cloudState.PersistState(nil)
+		if err != nil {
+			t.Fatalf("expected no error, got %q", err)
+		}
+
+		var expectedSerial uint64 = 1
+		if cloudState.readSerial != expectedSerial {
+			t.Fatalf("expected initial state readSerial to be %d, got %d", expectedSerial, cloudState.readSerial)
+		}
+	})
 }

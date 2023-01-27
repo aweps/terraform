@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package terraform
 
 import (
@@ -119,7 +122,11 @@ func (p *Provider) ApplyResourceChange(req providers.ApplyResourceChangeRequest)
 }
 
 // ImportResourceState requests that the given resource be imported.
-func (p *Provider) ImportResourceState(providers.ImportResourceStateRequest) providers.ImportResourceStateResponse {
+func (p *Provider) ImportResourceState(req providers.ImportResourceStateRequest) providers.ImportResourceStateResponse {
+	if req.TypeName == "terraform_data" {
+		return importDataStore(req)
+	}
+
 	panic("unimplemented - terraform_remote_state has no resources")
 }
 

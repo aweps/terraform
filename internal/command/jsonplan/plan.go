@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package jsonplan
 
 import (
@@ -5,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/zclconf/go-cty/cty"
 	ctyjson "github.com/zclconf/go-cty/cty/json"
@@ -25,7 +29,7 @@ import (
 // incremented for any change to this format that requires changes to a
 // consuming parser.
 const (
-	FormatVersion = "1.1"
+	FormatVersion = "1.2"
 
 	ResourceInstanceReplaceBecauseCannotUpdate    = "replace_because_cannot_update"
 	ResourceInstanceReplaceBecauseTainted         = "replace_because_tainted"
@@ -39,9 +43,7 @@ const (
 	ResourceInstanceDeleteBecauseNoMoveTarget     = "delete_because_no_move_target"
 	ResourceInstanceReadBecauseConfigUnknown      = "read_because_config_unknown"
 	ResourceInstanceReadBecauseDependencyPending  = "read_because_dependency_pending"
-
-	ManagedResourceMode = "managed"
-	DataResourceMode    = "data"
+	ResourceInstanceReadBecauseCheckNested        = "read_because_check_nested"
 )
 
 // Plan is the top-level representation of the json format of a plan. It includes
@@ -60,6 +62,7 @@ type plan struct {
 	Config             json.RawMessage   `json:"configuration,omitempty"`
 	RelevantAttributes []ResourceAttr    `json:"relevant_attributes,omitempty"`
 	Checks             json.RawMessage   `json:"checks,omitempty"`
+	Timestamp          string            `json:"timestamp,omitempty"`
 }
 
 func newPlan() *plan {
@@ -122,6 +125,20 @@ type Change struct {
 	// consists of one or more steps, each of which will be a number or a
 	// string.
 	ReplacePaths json.RawMessage `json:"replace_paths,omitempty"`
+
+	// Importing contains the import metadata about this operation. If importing
+	// is present (ie. not null) then the change is an import operation in
+	// addition to anything mentioned in the actions field. The actual contents
+	// of the Importing struct is subject to change, so downstream consumers
+	// should treat any values in here as strictly optional.
+	Importing *Importing `json:"importing,omitempty"`
+}
+
+// Importing is a nested object for the resource import metadata.
+type Importing struct {
+	// The original ID of this resource used to target it as part of planned
+	// import operation.
+	ID string `json:"id,omitempty"`
 }
 
 type output struct {
@@ -195,6 +212,7 @@ func Marshal(
 ) ([]byte, error) {
 	output := newPlan()
 	output.TerraformVersion = version.String()
+	output.Timestamp = p.Timestamp.Format(time.RFC3339)
 
 	err := output.marshalPlanVariables(p.VariableValues, config.Module.Variables)
 	if err != nil {
@@ -332,7 +350,16 @@ func (p *plan) marshalPlanVariables(vars map[string]plans.DynamicValue, decls ma
 func MarshalResourceChanges(resources []*plans.ResourceInstanceChangeSrc, schemas *terraform.Schemas) ([]ResourceChange, error) {
 	var ret []ResourceChange
 
-	for _, rc := range resources {
+	var sortedResources []*plans.ResourceInstanceChangeSrc
+	sortedResources = append(sortedResources, resources...)
+	sort.Slice(sortedResources, func(i, j int) bool {
+		if !sortedResources[i].Addr.Equal(sortedResources[j].Addr) {
+			return sortedResources[i].Addr.Less(sortedResources[j].Addr)
+		}
+		return sortedResources[i].DeposedKey < sortedResources[j].DeposedKey
+	})
+
+	for _, rc := range sortedResources {
 		var r ResourceChange
 		addr := rc.Addr
 		r.Address = addr.String()
@@ -424,6 +451,11 @@ func MarshalResourceChanges(resources []*plans.ResourceInstanceChangeSrc, schema
 			return nil, err
 		}
 
+		var importing *Importing
+		if rc.Importing != nil {
+			importing = &Importing{ID: rc.Importing.ID}
+		}
+
 		r.Change = Change{
 			Actions:         actionString(rc.Action.String()),
 			Before:          json.RawMessage(before),
@@ -432,6 +464,7 @@ func MarshalResourceChanges(resources []*plans.ResourceInstanceChangeSrc, schema
 			BeforeSensitive: json.RawMessage(beforeSensitive),
 			AfterSensitive:  json.RawMessage(afterSensitive),
 			ReplacePaths:    replacePaths,
+			Importing:       importing,
 		}
 
 		if rc.DeposedKey != states.NotDeposed {
@@ -448,9 +481,9 @@ func MarshalResourceChanges(resources []*plans.ResourceInstanceChangeSrc, schema
 
 		switch addr.Resource.Resource.Mode {
 		case addrs.ManagedResourceMode:
-			r.Mode = ManagedResourceMode
+			r.Mode = jsonstate.ManagedResourceMode
 		case addrs.DataResourceMode:
-			r.Mode = DataResourceMode
+			r.Mode = jsonstate.DataResourceMode
 		default:
 			return nil, fmt.Errorf("resource %s has an unsupported mode %s", r.Address, addr.Resource.Resource.Mode.String())
 		}
@@ -486,6 +519,8 @@ func MarshalResourceChanges(resources []*plans.ResourceInstanceChangeSrc, schema
 			r.ActionReason = ResourceInstanceReadBecauseConfigUnknown
 		case plans.ResourceInstanceReadBecauseDependencyPending:
 			r.ActionReason = ResourceInstanceReadBecauseDependencyPending
+		case plans.ResourceInstanceReadBecauseCheckNested:
+			r.ActionReason = ResourceInstanceReadBecauseCheckNested
 		default:
 			return nil, fmt.Errorf("resource %s has an unsupported action reason %s", r.Address, rc.ActionReason)
 		}
@@ -493,10 +528,6 @@ func MarshalResourceChanges(resources []*plans.ResourceInstanceChangeSrc, schema
 		ret = append(ret, r)
 
 	}
-
-	sort.Slice(ret, func(i, j int) bool {
-		return ret[i].Address < ret[j].Address
-	})
 
 	return ret, nil
 }
@@ -585,6 +616,10 @@ func MarshalOutputChanges(changes *plans.Changes) (map[string]Change, error) {
 			AfterUnknown:    a,
 			BeforeSensitive: json.RawMessage(sensitive),
 			AfterSensitive:  json.RawMessage(sensitive),
+
+			// Just to be explicit, outputs cannot be imported so this is always
+			// nil.
+			Importing: nil,
 		}
 
 		outputChanges[oc.Addr.OutputValue.Name] = c

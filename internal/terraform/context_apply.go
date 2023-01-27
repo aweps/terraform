@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package terraform
 
 import (
@@ -50,6 +53,9 @@ func (c *Context) Apply(plan *plans.Plan, config *configs.Config) (*states.State
 		// because that will tell us which checkable objects we're expecting
 		// to see updated results from during the apply step.
 		PlanTimeCheckResults: plan.Checks,
+
+		// We also want to propagate the timestamp from the plan file.
+		PlanTimeTimestamp: plan.Timestamp,
 	})
 	diags = diags.Append(walker.NonFatalDiagnostics)
 	diags = diags.Append(walkDiags)

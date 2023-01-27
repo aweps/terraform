@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package terraform
 
 import (
@@ -88,7 +91,7 @@ func (t *DestroyEdgeTransformer) tryInterProviderDestroyEdge(g *Graph, from, to 
 
 	// If this is a complete destroy operation, then there are no create/update
 	// nodes to worry about and we can accept the edge without deeper inspection.
-	if t.Operation == walkDestroy {
+	if t.Operation == walkDestroy || t.Operation == walkPlanDestroy {
 		return
 	}
 

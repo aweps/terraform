@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package terraform
 
 import (
@@ -129,10 +132,6 @@ func (n *NodeAbstractResource) ModulePath() addrs.Module {
 // GraphNodeReferenceable
 func (n *NodeAbstractResource) ReferenceableAddrs() []addrs.Referenceable {
 	return []addrs.Referenceable{n.Addr.Resource}
-}
-
-func (n *NodeAbstractResource) Import(addr *ImportTarget) {
-
 }
 
 // GraphNodeReferencer
