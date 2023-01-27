@@ -20,12 +20,16 @@ BUG FIXES:
 * Fix several Terraform crashes that are caused by HCL creating objects that should not exist in variables that specify default attributes in optional objects within collections. ([#32178](https://github.com/hashicorp/terraform/issues/32178))
 * Fix inconsistent behaviour in empty vs null collections. ([#32178](https://github.com/hashicorp/terraform/issues/32178))
 * `terraform workspace` now returns a non-zero exit when given an invalid argument [GH-31318]
+* Terraform would always plan changes when using a nested set attribute [GH-32536]
+* Terraform can now better detect when complex optional+computed object attributes are removed from configuration [GH-32551]
+* A new methodology for planning set elements can now better detect optional+computed changes within sets [GH-32563]
+
 
 ENHANCEMENTS:
 
 * `terraform plan` can now store a plan file even when encountering errors, which can later be inspected to help identify the source of the failures [GH-32395]
 * `terraform_data` is a new builtin managed resource type, which can replace the use of `null_resource`, and can store data of any type [GH-31757]
-* `terraform init` will now ignore entries in the optional global provider cache directory unless they match a checksum already tracked in the current configuration's dependency lock file. This therefore avoids the long-standing problem that when installing a new provider for the first time from the cache we can't determine the full set of checksums to include in the lock file. Once the lock file has been updated to include a checksum covering the item in the global cache, Terraform will then use the cache entry for subsequent installation of the same provider package. ([#32129](https://github.com/hashicorp/terraform/issues/32129))
+* `terraform init` will now ignore entries in the optional global provider cache directory unless they match a checksum already tracked in the current configuration's dependency lock file. This therefore avoids the long-standing problem that when installing a new provider for the first time from the cache we can't determine the full set of checksums to include in the lock file. Once the lock file has been updated to include a checksum covering the item in the global cache, Terraform will then use the cache entry for subsequent installation of the same provider package. There is an interim CLI configuration opt-out for those who rely on the previous incorrect behavior. ([#32129](https://github.com/hashicorp/terraform/issues/32129))
 * Interactive input for sensitive variables is now masked in the UI [GH-29520]
 * A new `-or-create` flag was added to `terraform workspace select`, to aid in creating workspaces in automated situations [GH-31633]
 * The "Failed to install provider" error message now includes the reason a provider could not be installed. ([#31898](https://github.com/hashicorp/terraform/issues/31898))
@@ -35,6 +39,8 @@ ENHANCEMENTS:
 * backed/gcs: Update storage package to v1.28.0 ([#29656](https://github.com/hashicorp/terraform/issues/29656))
 * When removing a workspace from the `cloud` backend `terraform workspace delete` will use Terraform Cloud's [Safe Delete](https://developer.hashicorp.com/terraform/cloud-docs/api-docs/workspaces#safe-delete-a-workspace) API if the `-force` flag is not provided. ([#31949](https://github.com/hashicorp/terraform/pull/31949))
 * backend/oss: More robustly handle endpoint retrieval error ([#32295](https://github.com/hashicorp/terraform/issues/32295))
+* local-exec provisioner: Added `quiet` argument. If `quiet` is set to `true`, Terraform will not print the entire command to stdout during plan. [GH-32116]
+* backend/http: Add support for mTLS authentication. [GH-31699]
 
 EXPERIMENTS:
 
