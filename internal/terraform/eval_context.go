@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package terraform
 
 import (
@@ -54,7 +57,7 @@ type EvalContext interface {
 	//
 	// This method expects an _absolute_ provider configuration address, since
 	// resources in one module are able to use providers from other modules.
-	ProviderSchema(addrs.AbsProviderConfig) (*ProviderSchema, error)
+	ProviderSchema(addrs.AbsProviderConfig) (providers.ProviderSchema, error)
 
 	// CloseProvider closes provider connections that aren't needed anymore.
 	//
@@ -125,7 +128,7 @@ type EvalContext interface {
 
 	// EvaluationScope returns a scope that can be used to evaluate reference
 	// addresses in this context.
-	EvaluationScope(self addrs.Referenceable, keyData InstanceKeyEvalData) *lang.Scope
+	EvaluationScope(self addrs.Referenceable, source addrs.Referenceable, keyData InstanceKeyEvalData) *lang.Scope
 
 	// SetRootModuleArgument defines the value for one variable of the root
 	// module. The caller must ensure that given value is a suitable

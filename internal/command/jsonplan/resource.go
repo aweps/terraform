@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package jsonplan
 
 import (
@@ -6,7 +9,7 @@ import (
 	"github.com/hashicorp/terraform/internal/addrs"
 )
 
-// Resource is the representation of a resource in the json plan
+// resource is the representation of a resource in the json plan
 type resource struct {
 	// Address is the absolute resource address
 	Address string `json:"address,omitempty"`

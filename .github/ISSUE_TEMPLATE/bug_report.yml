@@ -1,3 +1,6 @@
+# Copyright (c) HashiCorp, Inc.
+# SPDX-License-Identifier: BUSL-1.1
+
 name: Bug Report
 description: Let us know about an unexpected error, a crash, or an incorrect behavior.
 labels: ["bug", "new"]

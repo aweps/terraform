@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package terraform
 
 import (
@@ -70,8 +73,19 @@ type PlanGraphBuilder struct {
 	// Plan Operation this graph will be used for.
 	Operation walkOperation
 
+	// ExternalReferences allows the external caller to pass in references to
+	// nodes that should not be pruned even if they are not referenced within
+	// the actual graph.
+	ExternalReferences []*addrs.Reference
+
 	// ImportTargets are the list of resources to import.
 	ImportTargets []*ImportTarget
+
+	// GenerateConfig tells Terraform where to write and generated config for
+	// any import targets that do not already have configuration.
+	//
+	// If empty, then config will not be generated.
+	GenerateConfigPath string
 }
 
 // See GraphBuilder
@@ -108,16 +122,19 @@ func (b *PlanGraphBuilder) Steps() []GraphTransformer {
 			skip: b.Operation == walkPlanDestroy,
 
 			importTargets: b.ImportTargets,
+
+			// We only want to generate config during a plan operation.
+			generateConfigPathForImportTargets: b.GenerateConfigPath,
 		},
 
 		// Add dynamic values
-		&RootVariableTransformer{Config: b.Config, RawValues: b.RootVariableValues},
-		&ModuleVariableTransformer{Config: b.Config},
+		&RootVariableTransformer{Config: b.Config, RawValues: b.RootVariableValues, Planning: true},
+		&ModuleVariableTransformer{Config: b.Config, Planning: true},
 		&LocalTransformer{Config: b.Config},
 		&OutputTransformer{
 			Config:      b.Config,
 			RefreshOnly: b.skipPlanChanges || b.preDestroyRefresh,
-			PlanDestroy: b.Operation == walkPlanDestroy,
+			Destroying:  b.Operation == walkPlanDestroy,
 
 			// NOTE: We currently treat anything built with the plan graph
 			// builder as "planning" for our purposes here, because we share
@@ -125,6 +142,13 @@ func (b *PlanGraphBuilder) Steps() []GraphTransformer {
 			// types and so the pre-planning walks still think they are
 			// producing a plan even though we immediately discard it.
 			Planning: true,
+		},
+
+		// Add nodes and edges for the check block assertions. Check block data
+		// sources were added earlier.
+		&checkTransformer{
+			Config:    b.Config,
+			Operation: b.Operation,
 		},
 
 		// Add orphan resources
@@ -174,6 +198,11 @@ func (b *PlanGraphBuilder) Steps() []GraphTransformer {
 		// objects that can belong to modules.
 		&ModuleExpansionTransformer{Concrete: b.ConcreteModule, Config: b.Config},
 
+		// Plug in any external references.
+		&ExternalReferenceTransformer{
+			ExternalReferences: b.ExternalReferences,
+		},
+
 		&ReferenceTransformer{},
 
 		&AttachDependenciesTransformer{},
@@ -184,7 +213,9 @@ func (b *PlanGraphBuilder) Steps() []GraphTransformer {
 
 		// DestroyEdgeTransformer is only required during a plan so that the
 		// TargetsTransformer can determine which nodes to keep in the graph.
-		&DestroyEdgeTransformer{},
+		&DestroyEdgeTransformer{
+			Operation: b.Operation,
+		},
 
 		&pruneUnusedNodesTransformer{
 			skip: b.Operation != walkPlanDestroy,
@@ -300,6 +331,13 @@ func (b *PlanGraphBuilder) initImport() {
 			// as the new state, and users are not expecting the import process
 			// to update any other instances in state.
 			skipRefresh: true,
+
+			// If we get here, we know that we are in legacy import mode, and
+			// that the user has run the import command rather than plan.
+			// This flag must be propagated down to the
+			// NodePlannableResourceInstance so we can ignore the new import
+			// behaviour.
+			legacyImportMode: true,
 		}
 	}
 }

@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package terraform
 
 import (
@@ -38,7 +41,6 @@ func simpleMockPluginLibrary() *contextPlugins {
 			},
 		},
 	}
-	ret.init() // prepare the internal cache data structures
 	return ret
 }
 

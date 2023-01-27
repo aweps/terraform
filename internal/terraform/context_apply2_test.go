@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package terraform
 
 import (
@@ -1831,4 +1834,413 @@ output "a" {
 	assertNoErrors(t, diags)
 	_, diags = ctx.Apply(plan, m)
 	assertNoErrors(t, diags)
+}
+
+func TestContext2Apply_destroyNullModuleOutput(t *testing.T) {
+	p := testProvider("test")
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+	})
+
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+module "null_module" {
+  source = "./mod"
+}
+
+locals {
+  module_output = module.null_module.null_module_test
+}
+
+output "test_root" {
+  value = module.null_module.test_output
+}
+
+output "root_module" {
+  value = local.module_output #fails
+}
+`,
+
+		"mod/main.tf": `
+output "test_output" {
+  value = "test"
+}
+
+output "null_module_test" {
+  value = null
+}
+`,
+	})
+
+	// verify plan and apply
+	plan, diags := ctx.Plan(m, states.NewState(), &PlanOpts{
+		Mode: plans.NormalMode,
+	})
+	assertNoErrors(t, diags)
+	state, diags := ctx.Apply(plan, m)
+	assertNoErrors(t, diags)
+
+	// now destroy
+	plan, diags = ctx.Plan(m, state, &PlanOpts{
+		Mode: plans.DestroyMode,
+	})
+	assertNoErrors(t, diags)
+	_, diags = ctx.Apply(plan, m)
+	assertNoErrors(t, diags)
+}
+
+func TestContext2Apply_moduleOutputWithSensitiveAttrs(t *testing.T) {
+	// Ensure that nested sensitive marks are stored when accessing non-root
+	// module outputs, and that they do not cause the entire output value to
+	// become sensitive.
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+module "mod" {
+  source = "./mod"
+}
+
+resource "test_resource" "b" {
+  // if the module output were wholly sensitive it would not be valid to use in
+  // for_each
+  for_each = module.mod.resources
+  value = each.value.output
+}
+
+output "root_output" {
+  // The root output cannot contain any sensitive marks at all.
+  // Applying nonsensitive would fail here if the nested sensitive mark were
+  // not maintained through the output.
+  value = [ for k, v in module.mod.resources : nonsensitive(v.output) ]
+}
+`,
+		"./mod/main.tf": `
+resource "test_resource" "a" {
+  for_each = {"key": "value"}
+  value = each.key
+}
+
+output "resources" {
+  value = test_resource.a
+}
+`,
+	})
+
+	p := testProvider("test")
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_resource": {
+				Attributes: map[string]*configschema.Attribute{
+					"value": {
+						Type:     cty.String,
+						Required: true,
+					},
+					"output": {
+						Type:      cty.String,
+						Sensitive: true,
+						Computed:  true,
+					},
+				},
+			},
+		},
+	})
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+	})
+	plan, diags := ctx.Plan(m, states.NewState(), &PlanOpts{
+		Mode: plans.NormalMode,
+	})
+	assertNoErrors(t, diags)
+	_, diags = ctx.Apply(plan, m)
+	assertNoErrors(t, diags)
+}
+
+func TestContext2Apply_timestamps(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_resource" "a" {
+  id = "timestamp"
+  value = timestamp()
+}
+
+resource "test_resource" "b" {
+  id = "plantimestamp"
+  value = plantimestamp()
+}
+`,
+	})
+
+	var plantime time.Time
+
+	p := testProvider("test")
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_resource": {
+				Attributes: map[string]*configschema.Attribute{
+					"id": {
+						Type:     cty.String,
+						Required: true,
+					},
+					"value": {
+						Type:     cty.String,
+						Required: true,
+					},
+				},
+			},
+		},
+	})
+	p.PlanResourceChangeFn = func(request providers.PlanResourceChangeRequest) providers.PlanResourceChangeResponse {
+		values := request.ProposedNewState.AsValueMap()
+		if id := values["id"]; id.AsString() == "plantimestamp" {
+			var err error
+			plantime, err = time.Parse(time.RFC3339, values["value"].AsString())
+			if err != nil {
+				t.Errorf("couldn't parse plan time: %s", err)
+			}
+		}
+
+		return providers.PlanResourceChangeResponse{
+			PlannedState: request.ProposedNewState,
+		}
+	}
+	p.ApplyResourceChangeFn = func(request providers.ApplyResourceChangeRequest) providers.ApplyResourceChangeResponse {
+		values := request.PlannedState.AsValueMap()
+		if id := values["id"]; id.AsString() == "timestamp" {
+			applytime, err := time.Parse(time.RFC3339, values["value"].AsString())
+			if err != nil {
+				t.Errorf("couldn't parse apply time: %s", err)
+			}
+
+			if applytime.Before(plantime) {
+				t.Errorf("applytime (%s) should be after plantime (%s)", applytime.Format(time.RFC3339), plantime.Format(time.RFC3339))
+			}
+		} else if id.AsString() == "plantimestamp" {
+			otherplantime, err := time.Parse(time.RFC3339, values["value"].AsString())
+			if err != nil {
+				t.Errorf("couldn't parse plan time: %s", err)
+			}
+
+			if !plantime.Equal(otherplantime) {
+				t.Errorf("plantime changed from (%s) to (%s) during apply", plantime.Format(time.RFC3339), otherplantime.Format(time.RFC3339))
+			}
+		}
+
+		return providers.ApplyResourceChangeResponse{
+			NewState: request.PlannedState,
+		}
+	}
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+	})
+	plan, diags := ctx.Plan(m, states.NewState(), &PlanOpts{
+		Mode: plans.NormalMode,
+	})
+	assertNoErrors(t, diags)
+
+	_, diags = ctx.Apply(plan, m)
+	assertNoErrors(t, diags)
+}
+
+func TestContext2Apply_destroyUnusedModuleProvider(t *testing.T) {
+	// an unsued provider within a module should not be called during destroy
+	unusedProvider := testProvider("unused")
+	testProvider := testProvider("test")
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"):   testProviderFuncFixed(testProvider),
+			addrs.NewDefaultProvider("unused"): testProviderFuncFixed(unusedProvider),
+		},
+	})
+
+	unusedProvider.ConfigureProviderFn = func(req providers.ConfigureProviderRequest) (resp providers.ConfigureProviderResponse) {
+		resp.Diagnostics = resp.Diagnostics.Append(errors.New("configuration failed"))
+		return resp
+	}
+
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+module "mod" {
+  source = "./mod"
+}
+
+resource "test_resource" "test" {
+}
+`,
+
+		"mod/main.tf": `
+provider "unused" {
+}
+
+resource "unused_resource" "test" {
+}
+`,
+	})
+
+	plan, diags := ctx.Plan(m, states.NewState(), &PlanOpts{
+		Mode: plans.DestroyMode,
+	})
+	assertNoErrors(t, diags)
+	_, diags = ctx.Apply(plan, m)
+	assertNoErrors(t, diags)
+}
+
+func TestContext2Apply_import(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_resource" "a" {
+  id = "importable"
+}
+
+import {
+  to = test_resource.a
+  id = "importable" 
+}
+`,
+	})
+
+	p := testProvider("test")
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_resource": {
+				Attributes: map[string]*configschema.Attribute{
+					"id": {
+						Type:     cty.String,
+						Required: true,
+					},
+				},
+			},
+		},
+	})
+	p.PlanResourceChangeFn = func(req providers.PlanResourceChangeRequest) providers.PlanResourceChangeResponse {
+		return providers.PlanResourceChangeResponse{
+			PlannedState: req.ProposedNewState,
+		}
+	}
+	p.ImportResourceStateFn = func(req providers.ImportResourceStateRequest) providers.ImportResourceStateResponse {
+		return providers.ImportResourceStateResponse{
+			ImportedResources: []providers.ImportedResource{
+				{
+					TypeName: "test_instance",
+					State: cty.ObjectVal(map[string]cty.Value{
+						"id": cty.StringVal("importable"),
+					}),
+				},
+			},
+		}
+	}
+	hook := new(MockHook)
+	ctx := testContext2(t, &ContextOpts{
+		Hooks: []Hook{hook},
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+	})
+	plan, diags := ctx.Plan(m, states.NewState(), &PlanOpts{
+		Mode: plans.NormalMode,
+	})
+	assertNoErrors(t, diags)
+
+	_, diags = ctx.Apply(plan, m)
+	assertNoErrors(t, diags)
+
+	if !hook.PreApplyImportCalled {
+		t.Fatalf("PreApplyImport hook not called")
+	}
+	if addr, wantAddr := hook.PreApplyImportAddr, mustResourceInstanceAddr("test_resource.a"); !addr.Equal(wantAddr) {
+		t.Errorf("expected addr to be %s, but was %s", wantAddr, addr)
+	}
+
+	if !hook.PostApplyImportCalled {
+		t.Fatalf("PostApplyImport hook not called")
+	}
+	if addr, wantAddr := hook.PostApplyImportAddr, mustResourceInstanceAddr("test_resource.a"); !addr.Equal(wantAddr) {
+		t.Errorf("expected addr to be %s, but was %s", wantAddr, addr)
+	}
+}
+
+func TestContext2Apply_noExternalReferences(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_object" "a" {
+	test_string = "foo"
+}
+
+locals {
+  local_value = test_object.a.test_string
+}
+`,
+	})
+
+	p := simpleMockProvider()
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+	})
+
+	plan, diags := ctx.Plan(m, states.NewState(), nil)
+	if diags.HasErrors() {
+		t.Errorf("expected no errors, but got %s", diags)
+	}
+
+	state, diags := ctx.Apply(plan, m)
+	if diags.HasErrors() {
+		t.Errorf("expected no errors, but got %s", diags)
+	}
+
+	// We didn't specify any external references, so the unreferenced local
+	// value should have been tidied up and never made it into the state.
+	module := state.RootModule()
+	if len(module.LocalValues) > 0 {
+		t.Errorf("expected no local values in the state but found %d", len(module.LocalValues))
+	}
+}
+
+func TestContext2Apply_withExternalReferences(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_object" "a" {
+	test_string = "foo"
+}
+
+locals {
+  local_value = test_object.a.test_string
+}
+`,
+	})
+
+	p := simpleMockProvider()
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+	})
+
+	plan, diags := ctx.Plan(m, states.NewState(), &PlanOpts{
+		Mode: plans.NormalMode,
+		ExternalReferences: []*addrs.Reference{
+			mustReference("local.local_value"),
+		},
+	})
+	if diags.HasErrors() {
+		t.Errorf("expected no errors, but got %s", diags)
+	}
+
+	state, diags := ctx.Apply(plan, m)
+	if diags.HasErrors() {
+		t.Errorf("expected no errors, but got %s", diags)
+	}
+
+	// We did specify the local value in the external references, so it should
+	// have been preserved even though it is not referenced by anything directly
+	// in the config.
+	module := state.RootModule()
+	if module.LocalValues["local_value"].AsString() != "foo" {
+		t.Errorf("expected local value to be \"foo\" but was \"%s\"", module.LocalValues["local_value"].AsString())
+	}
 }

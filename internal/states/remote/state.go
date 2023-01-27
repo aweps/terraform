@@ -1,12 +1,17 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package remote
 
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"sync"
 
 	uuid "github.com/hashicorp/go-uuid"
 
+	"github.com/hashicorp/terraform/internal/backend/local"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/states/statefile"
 	"github.com/hashicorp/terraform/internal/states/statemgr"
@@ -35,10 +40,17 @@ type State struct {
 	serial, readSerial   uint64
 	state, readState     *states.State
 	disableLocks         bool
+
+	// If this is set then the state manager will decline to store intermediate
+	// state snapshots created while a Terraform Core apply operation is in
+	// progress. Otherwise (by default) it will accept persistent snapshots
+	// using the default rules defined in the local backend.
+	DisableIntermediateSnapshots bool
 }
 
 var _ statemgr.Full = (*State)(nil)
 var _ statemgr.Migrator = (*State)(nil)
+var _ local.IntermediateStateConditionalPersister = (*State)(nil)
 
 // statemgr.Reader impl.
 func (s *State) State() *states.State {
@@ -158,6 +170,9 @@ func (s *State) PersistState(schemas *terraform.Schemas) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	log.Printf("[DEBUG] states/remote: state read serial is: %d; serial is: %d", s.readSerial, s.serial)
+	log.Printf("[DEBUG] states/remote: state read lineage is: %s; lineage is: %s", s.readLineage, s.lineage)
+
 	if s.readState != nil {
 		lineageUnchanged := s.readLineage != "" && s.lineage == s.readLineage
 		serialUnchanged := s.readSerial != 0 && s.serial == s.readSerial
@@ -175,13 +190,15 @@ func (s *State) PersistState(schemas *terraform.Schemas) error {
 		if err != nil {
 			return fmt.Errorf("failed checking for existing remote state: %s", err)
 		}
+		log.Printf("[DEBUG] states/remote: after refresh, state read serial is: %d; serial is: %d", s.readSerial, s.serial)
+		log.Printf("[DEBUG] states/remote: after refresh, state read lineage is: %s; lineage is: %s", s.readLineage, s.lineage)
 		if s.lineage == "" { // indicates that no state snapshot is present yet
 			lineage, err := uuid.GenerateUUID()
 			if err != nil {
 				return fmt.Errorf("failed to generate initial lineage: %v", err)
 			}
 			s.lineage = lineage
-			s.serial = 0
+			s.serial++
 		}
 	}
 
@@ -208,6 +225,14 @@ func (s *State) PersistState(schemas *terraform.Schemas) error {
 	s.readLineage = s.lineage
 	s.readSerial = s.serial
 	return nil
+}
+
+// ShouldPersistIntermediateState implements local.IntermediateStateConditionalPersister
+func (s *State) ShouldPersistIntermediateState(info *local.IntermediateStatePersistInfo) bool {
+	if s.DisableIntermediateSnapshots {
+		return false
+	}
+	return local.DefaultIntermediateStatePersistRule(info)
 }
 
 // Lock calls the Client's Lock method if it's implemented.

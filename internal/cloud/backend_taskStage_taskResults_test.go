@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package cloud
 
 import (
@@ -151,7 +154,7 @@ func TestCloud_runTasksWithTaskResults(t *testing.T) {
 		trs := taskResultSummarizer{
 			cloud: b,
 		}
-		c.context.Poll(taskStageBackoffMin, taskStageBackoffMax, func(i int) (bool, error) {
+		c.context.Poll(0, 0, func(i int) (bool, error) {
 			cont, _, _ := trs.Summarize(c.context, c.writer, c.taskStage())
 			if cont {
 				return true, nil

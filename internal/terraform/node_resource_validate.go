@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package terraform
 
 import (
@@ -5,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/zclconf/go-cty/cty"
+
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
@@ -14,7 +19,6 @@ import (
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/provisioners"
 	"github.com/hashicorp/terraform/internal/tfdiags"
-	"github.com/zclconf/go-cty/cty"
 )
 
 // NodeValidatableResource represents a resource that is used for validation
@@ -41,6 +45,10 @@ func (n *NodeValidatableResource) Path() addrs.ModuleInstance {
 
 // GraphNodeEvalable
 func (n *NodeValidatableResource) Execute(ctx EvalContext, op walkOperation) (diags tfdiags.Diagnostics) {
+	if n.Config == nil {
+		return diags
+	}
+
 	diags = diags.Append(n.validateResource(ctx))
 
 	diags = diags.Append(n.validateCheckRules(ctx, n.Config))
@@ -268,10 +276,6 @@ func (n *NodeValidatableResource) validateResource(ctx EvalContext) tfdiags.Diag
 	if diags.HasErrors() {
 		return diags
 	}
-	if providerSchema == nil {
-		diags = diags.Append(fmt.Errorf("validateResource has nil schema for %s", n.Addr))
-		return diags
-	}
 
 	keyData := EvalDataForNoInstanceKey
 
@@ -462,10 +466,10 @@ func (n *NodeValidatableResource) validateResource(ctx EvalContext) tfdiags.Diag
 func (n *NodeValidatableResource) evaluateExpr(ctx EvalContext, expr hcl.Expression, wantTy cty.Type, self addrs.Referenceable, keyData instances.RepetitionData) (cty.Value, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 
-	refs, refDiags := lang.ReferencesInExpr(expr)
+	refs, refDiags := lang.ReferencesInExpr(addrs.ParseRef, expr)
 	diags = diags.Append(refDiags)
 
-	scope := ctx.EvaluationScope(self, keyData)
+	scope := ctx.EvaluationScope(self, nil, keyData)
 
 	hclCtx, moreDiags := scope.EvalContext(refs)
 	diags = diags.Append(moreDiags)
@@ -581,7 +585,7 @@ func validateDependsOn(ctx EvalContext, dependsOn []hcl.Traversal) (diags tfdiag
 		// we'll just eval it and count on the fact that our evaluator will
 		// detect references to non-existent objects.
 		if !diags.HasErrors() {
-			scope := ctx.EvaluationScope(nil, EvalDataForNoInstanceKey)
+			scope := ctx.EvaluationScope(nil, nil, EvalDataForNoInstanceKey)
 			if scope != nil { // sometimes nil in tests, due to incomplete mocks
 				_, refDiags = scope.EvalReference(ref, cty.DynamicPseudoType)
 				diags = diags.Append(refDiags)

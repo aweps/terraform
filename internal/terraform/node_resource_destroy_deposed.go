@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package terraform
 
 import (
@@ -310,10 +313,6 @@ func (n *NodeDestroyDeposedResourceInstanceObject) writeResourceInstanceState(ct
 	_, providerSchema, err := getProvider(ctx, n.ResolvedProvider)
 	if err != nil {
 		return err
-	}
-	if providerSchema == nil {
-		// Should never happen, unless our state object is nil
-		panic("writeResourceInstanceStateDeposed used with no ProviderSchema object")
 	}
 
 	schema, currentVersion := providerSchema.SchemaForResourceAddr(absAddr.ContainingResource().Resource)

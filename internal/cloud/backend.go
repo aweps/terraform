@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package cloud
 
 import (
@@ -23,6 +26,7 @@ import (
 	"github.com/zclconf/go-cty/cty/gocty"
 
 	"github.com/hashicorp/terraform/internal/backend"
+	"github.com/hashicorp/terraform/internal/command/jsonformat"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/states/statemgr"
@@ -39,6 +43,7 @@ const (
 	tfeServiceID       = "tfe.v2"
 	headerSourceKey    = "X-Terraform-Integration"
 	headerSourceValue  = "cloud"
+	genericHostname    = "localterraform.com"
 )
 
 // Cloud is an implementation of EnhancedBackend in service of the Terraform Cloud/Enterprise
@@ -61,8 +66,11 @@ type Cloud struct {
 	// lastRetry is set to the last time a request was retried.
 	lastRetry time.Time
 
-	// hostname of Terraform Cloud or Terraform Enterprise
-	hostname string
+	// Hostname of Terraform Cloud or Terraform Enterprise
+	Hostname string
+
+	// token for Terraform Cloud or Terraform Enterprise
+	token string
 
 	// organization is the organization that contains the target workspaces.
 	organization string
@@ -73,6 +81,9 @@ type Cloud struct {
 
 	// services is used for service discovery
 	services *disco.Disco
+
+	// renderer is used for rendering JSON plan output and streamed logs.
+	renderer *jsonformat.Renderer
 
 	// local allows local operations, where Terraform Cloud serves as a state storage backend.
 	local backend.Enhanced
@@ -137,6 +148,11 @@ func (b *Cloud) ConfigSchema() *configschema.Block {
 							Optional:    true,
 							Description: schemaDescriptionName,
 						},
+						"project": {
+							Type:        cty.String,
+							Optional:    true,
+							Description: schemaDescriptionProject,
+						},
 						"tags": {
 							Type:        cty.Set(cty.String),
 							Optional:    true,
@@ -167,6 +183,9 @@ func (b *Cloud) PrepareConfig(obj cty.Value) (cty.Value, tfdiags.Diagnostics) {
 	}
 
 	WorkspaceMapping := WorkspaceMapping{}
+	// Initially set the workspace name via env var
+	WorkspaceMapping.Name = os.Getenv("TF_WORKSPACE")
+
 	if workspaces := obj.GetAttr("workspaces"); !workspaces.IsNull() {
 		if val := workspaces.GetAttr("name"); !val.IsNull() {
 			WorkspaceMapping.Name = val.AsString()
@@ -174,11 +193,9 @@ func (b *Cloud) PrepareConfig(obj cty.Value) (cty.Value, tfdiags.Diagnostics) {
 		if val := workspaces.GetAttr("tags"); !val.IsNull() {
 			err := gocty.FromCtyValue(val, &WorkspaceMapping.Tags)
 			if err != nil {
-				log.Panicf("An unxpected error occurred: %s", err)
+				log.Panicf("An unexpected error occurred: %s", err)
 			}
 		}
-	} else {
-		WorkspaceMapping.Name = os.Getenv("TF_WORKSPACE")
 	}
 
 	switch WorkspaceMapping.Strategy() {
@@ -191,6 +208,28 @@ func (b *Cloud) PrepareConfig(obj cty.Value) (cty.Value, tfdiags.Diagnostics) {
 	}
 
 	return obj, diags
+}
+
+func (b *Cloud) ServiceDiscoveryAliases() ([]backend.HostAlias, error) {
+	aliasHostname, err := svchost.ForComparison(genericHostname)
+	if err != nil {
+		// This should never happen because the hostname is statically defined.
+		return nil, fmt.Errorf("failed to create backend alias from alias %q. The hostname is not in the correct format. This is a bug in the backend", genericHostname)
+	}
+
+	targetHostname, err := svchost.ForComparison(b.Hostname)
+	if err != nil {
+		// This should never happen because the 'to' alias is the backend host, which has
+		// already been ev
+		return nil, fmt.Errorf("failed to create backend alias to target %q. The hostname is not in the correct format.", b.Hostname)
+	}
+
+	return []backend.HostAlias{
+		{
+			From: aliasHostname,
+			To:   targetHostname,
+		},
+	}, nil
 }
 
 // Configure implements backend.Enhanced.
@@ -228,7 +267,7 @@ func (b *Cloud) Configure(obj cty.Value) tfdiags.Diagnostics {
 	// Get the token from the CLI Config File in the credentials section
 	// if no token was not set in the configuration
 	if token == "" {
-		token, err = b.token()
+		token, err = b.cliConfigToken()
 		if err != nil {
 			diags = diags.Append(tfdiags.AttributeValue(
 				tfdiags.Error,
@@ -243,20 +282,22 @@ func (b *Cloud) Configure(obj cty.Value) tfdiags.Diagnostics {
 	// Return an error if we still don't have a token at this point.
 	if token == "" {
 		loginCommand := "terraform login"
-		if b.hostname != defaultHostname {
-			loginCommand = loginCommand + " " + b.hostname
+		if b.Hostname != defaultHostname {
+			loginCommand = loginCommand + " " + b.Hostname
 		}
 		diags = diags.Append(tfdiags.Sourceless(
 			tfdiags.Error,
 			"Required token could not be found",
 			fmt.Sprintf(
 				"Run the following command to generate a token for %s:\n    %s",
-				b.hostname,
+				b.Hostname,
 				loginCommand,
 			),
 		))
 		return diags
 	}
+
+	b.token = token
 
 	if b.client == nil {
 		cfg := &tfe.Config{
@@ -293,11 +334,11 @@ func (b *Cloud) Configure(obj cty.Value) tfdiags.Diagnostics {
 			err = fmt.Errorf("organization %q at host %s not found.\n\n"+
 				"Please ensure that the organization and hostname are correct "+
 				"and that your API token for %s is valid.",
-				b.organization, b.hostname, b.hostname)
+				b.organization, b.Hostname, b.Hostname)
 		}
 		diags = diags.Append(tfdiags.AttributeValue(
 			tfdiags.Error,
-			fmt.Sprintf("Failed to read organization %q at host %s", b.organization, b.hostname),
+			fmt.Sprintf("Failed to read organization %q at host %s", b.organization, b.Hostname),
 			fmt.Sprintf("Encountered an unexpected error while reading the "+
 				"organization settings: %s", err),
 			cty.Path{cty.GetAttrStep{Name: "organization"}},
@@ -360,11 +401,11 @@ func (b *Cloud) setConfigurationFields(obj cty.Value) tfdiags.Diagnostics {
 	var diags tfdiags.Diagnostics
 
 	// Get the hostname.
-	b.hostname = os.Getenv("TF_CLOUD_HOSTNAME")
+	b.Hostname = os.Getenv("TF_CLOUD_HOSTNAME")
 	if val := obj.GetAttr("hostname"); !val.IsNull() && val.AsString() != "" {
-		b.hostname = val.AsString()
-	} else if b.hostname == "" {
-		b.hostname = defaultHostname
+		b.Hostname = val.AsString()
+	} else if b.Hostname == "" {
+		b.Hostname = defaultHostname
 	}
 
 	// We can have two options, setting the organization via the config
@@ -378,9 +419,20 @@ func (b *Cloud) setConfigurationFields(obj cty.Value) tfdiags.Diagnostics {
 		b.organization = val.AsString()
 	}
 
+	// Initially set the project via env var
+	b.WorkspaceMapping.Project = os.Getenv("TF_CLOUD_PROJECT")
+
+	// Initially set the workspace name via env var
+	b.WorkspaceMapping.Name = os.Getenv("TF_WORKSPACE")
+
 	// Get the workspaces configuration block and retrieve the
 	// default workspace name.
 	if workspaces := obj.GetAttr("workspaces"); !workspaces.IsNull() {
+
+		// Check if the project is present and valid in the config.
+		if val := workspaces.GetAttr("project"); !val.IsNull() && val.AsString() != "" {
+			b.WorkspaceMapping.Project = val.AsString()
+		}
 
 		// PrepareConfig checks that you cannot set both of these.
 		if val := workspaces.GetAttr("name"); !val.IsNull() {
@@ -395,8 +447,6 @@ func (b *Cloud) setConfigurationFields(obj cty.Value) tfdiags.Diagnostics {
 
 			b.WorkspaceMapping.Tags = tags
 		}
-	} else {
-		b.WorkspaceMapping.Name = os.Getenv("TF_WORKSPACE")
 	}
 
 	// Determine if we are forced to use the local backend.
@@ -407,7 +457,7 @@ func (b *Cloud) setConfigurationFields(obj cty.Value) tfdiags.Diagnostics {
 
 // discover the TFC/E API service URL and version constraints.
 func (b *Cloud) discover() (*url.URL, error) {
-	hostname, err := svchost.ForComparison(b.hostname)
+	hostname, err := svchost.ForComparison(b.Hostname)
 	if err != nil {
 		return nil, err
 	}
@@ -434,17 +484,17 @@ func (b *Cloud) discover() (*url.URL, error) {
 	return service, err
 }
 
-// token returns the token for this host as configured in the credentials
+// cliConfigToken returns the token for this host as configured in the credentials
 // section of the CLI Config File. If no token was configured, an empty
 // string will be returned instead.
-func (b *Cloud) token() (string, error) {
-	hostname, err := svchost.ForComparison(b.hostname)
+func (b *Cloud) cliConfigToken() (string, error) {
+	hostname, err := svchost.ForComparison(b.Hostname)
 	if err != nil {
 		return "", err
 	}
 	creds, err := b.services.CredentialsForHost(hostname)
 	if err != nil {
-		log.Printf("[WARN] Failed to get credentials for %s: %s (ignoring)", b.hostname, err)
+		log.Printf("[WARN] Failed to get credentials for %s: %s (ignoring)", b.Hostname, err)
 		return "", nil
 	}
 	if creds != nil {
@@ -499,6 +549,22 @@ func (b *Cloud) Workspaces() ([]string, error) {
 		options.Tags = taglist
 	}
 
+	if b.WorkspaceMapping.Project != "" {
+		listOpts := &tfe.ProjectListOptions{
+			Name: b.WorkspaceMapping.Project,
+		}
+		projects, err := b.client.Projects.List(context.Background(), b.organization, listOpts)
+		if err != nil && err != tfe.ErrResourceNotFound {
+			return nil, fmt.Errorf("failed to retrieve project %s: %v", listOpts.Name, err)
+		}
+		for _, p := range projects.Items {
+			if p.Name == b.WorkspaceMapping.Project {
+				options.ProjectID = p.ID
+				break
+			}
+		}
+	}
+
 	for {
 		wl, err := b.client.Workspaces.List(context.Background(), b.organization, options)
 		if err != nil {
@@ -544,7 +610,7 @@ func (b *Cloud) DeleteWorkspace(name string, force bool) error {
 	}
 
 	// Configure the remote workspace name.
-	State := &State{tfeClient: b.client, organization: b.organization, workspace: workspace}
+	State := &State{tfeClient: b.client, organization: b.organization, workspace: workspace, enableIntermediateSnapshots: false}
 	return State.Delete(force)
 }
 
@@ -568,17 +634,66 @@ func (b *Cloud) StateMgr(name string) (statemgr.Full, error) {
 		remoteTFVersion = workspace.TerraformVersion
 	}
 
-	if err == tfe.ErrResourceNotFound {
-		// Create a workspace
-		options := tfe.WorkspaceCreateOptions{
-			Name: tfe.String(name),
-			Tags: b.WorkspaceMapping.tfeTags(),
+	var configuredProject *tfe.Project
+
+	// Attempt to find project if configured
+	if b.WorkspaceMapping.Project != "" {
+		listOpts := &tfe.ProjectListOptions{
+			Name: b.WorkspaceMapping.Project,
+		}
+		projects, err := b.client.Projects.List(context.Background(), b.organization, listOpts)
+		if err != nil && err != tfe.ErrResourceNotFound {
+			// This is a failure to make an API request, fail to initialize
+			return nil, fmt.Errorf("Attempted to find configured project %s but was unable to.", b.WorkspaceMapping.Project)
+		}
+		for _, p := range projects.Items {
+			if p.Name == b.WorkspaceMapping.Project {
+				configuredProject = p
+				break
+			}
 		}
 
+		if configuredProject == nil {
+			// We were able to read project, but were unable to find the configured project
+			// This is not fatal as we may attempt to create the project if we need to create
+			// the workspace
+			log.Printf("[TRACE] cloud: Attempted to find configured project %s but was unable to.", b.WorkspaceMapping.Project)
+		}
+	}
+
+	if err == tfe.ErrResourceNotFound {
+		// Create workspace if it was not found
+
+		// Workspace Create Options
+		workspaceCreateOptions := tfe.WorkspaceCreateOptions{
+			Name:    tfe.String(name),
+			Tags:    b.WorkspaceMapping.tfeTags(),
+			Project: configuredProject,
+		}
+
+		// Create project if not exists, otherwise use it
+		if workspaceCreateOptions.Project == nil && b.WorkspaceMapping.Project != "" {
+			// If we didn't find the project, try to create it
+			if workspaceCreateOptions.Project == nil {
+				createOpts := tfe.ProjectCreateOptions{
+					Name: b.WorkspaceMapping.Project,
+				}
+				// didn't find project, create it instead
+				log.Printf("[TRACE] cloud: Creating Terraform Cloud project %s/%s", b.organization, b.WorkspaceMapping.Project)
+				project, err := b.client.Projects.Create(context.Background(), b.organization, createOpts)
+				if err != nil && err != tfe.ErrResourceNotFound {
+					return nil, fmt.Errorf("failed to create project %s: %v", b.WorkspaceMapping.Project, err)
+				}
+				configuredProject = project
+				workspaceCreateOptions.Project = configuredProject
+			}
+		}
+
+		// Create a workspace
 		log.Printf("[TRACE] cloud: Creating Terraform Cloud workspace %s/%s", b.organization, name)
-		workspace, err = b.client.Workspaces.Create(context.Background(), b.organization, options)
+		workspace, err = b.client.Workspaces.Create(context.Background(), b.organization, workspaceCreateOptions)
 		if err != nil {
-			return nil, fmt.Errorf("Error creating workspace %s: %v", name, err)
+			return nil, fmt.Errorf("error creating workspace %s: %v", name, err)
 		}
 
 		remoteTFVersion = workspace.TerraformVersion
@@ -630,7 +745,7 @@ func (b *Cloud) StateMgr(name string) (statemgr.Full, error) {
 		}
 	}
 
-	return &State{tfeClient: b.client, organization: b.organization, workspace: workspace}, nil
+	return &State{tfeClient: b.client, organization: b.organization, workspace: workspace, enableIntermediateSnapshots: false}, nil
 }
 
 // Operation implements backend.Enhanced.
@@ -955,8 +1070,9 @@ func (b *Cloud) workspaceTagsRequireUpdate(workspace *tfe.Workspace, workspaceMa
 }
 
 type WorkspaceMapping struct {
-	Name string
-	Tags []string
+	Name    string
+	Project string
+	Tags    []string
 }
 
 type workspaceStrategy string
@@ -1182,4 +1298,6 @@ is the primary and recommended strategy to use.  This option conflicts with "nam
 
 	schemaDescriptionName = `The name of a single Terraform Cloud workspace to be used with this configuration.
 When configured, only the specified workspace can be used. This option conflicts with "tags".`
+
+	schemaDescriptionProject = `The name of a project that resulting workspace(s) will be created in.`
 )

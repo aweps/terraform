@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package terraform
 
 import (
@@ -9,6 +12,7 @@ import (
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/hashicorp/terraform/internal/addrs"
+	"github.com/hashicorp/terraform/internal/checks"
 	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/lang/marks"
 	"github.com/hashicorp/terraform/internal/tfdiags"
@@ -180,6 +184,33 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 				}
 			]
 		}
+		// https://github.com/hashicorp/terraform/issues/32396
+		// This variable was originally introduced to test the behaviour of the
+        // dynamic type constraint. You should be able to set primitive types in
+        // the list consistently.
+        variable "list_with_nested_collections_dynamic_with_default" {
+			type = list(
+				object({
+					name = optional(string, "default")
+					taints = optional(list(map(any)), [])
+				})
+			)
+		}
+        // https://github.com/hashicorp/terraform/issues/32752
+		// This variable was introduced to make sure the evaluation doesn't 
+        // crash even when the types are wrong.
+        variable "invalid_nested_type" {
+            type = map(
+                object({
+					rules = map(
+						object({
+							destination_addresses = optional(list(string), [])
+						})
+					)
+                })
+            )
+			default = {}
+        }
 	`
 	cfg := testModuleInline(t, map[string]string{
 		"main.tf": cfgSrc,
@@ -510,6 +541,39 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 			cty.UnknownVal(cty.String),
 			``,
 		},
+		{
+			"list_with_nested_collections_dynamic_with_default",
+			cty.TupleVal([]cty.Value{
+				cty.ObjectVal(map[string]cty.Value{
+					"name": cty.StringVal("default"),
+				}),
+				cty.ObjectVal(map[string]cty.Value{
+					"name": cty.StringVal("complex"),
+					"taints": cty.ListVal([]cty.Value{
+						cty.MapVal(map[string]cty.Value{
+							"key":   cty.StringVal("my_key"),
+							"value": cty.StringVal("my_value"),
+						}),
+					}),
+				}),
+			}),
+			cty.ListVal([]cty.Value{
+				cty.ObjectVal(map[string]cty.Value{
+					"name":   cty.StringVal("default"),
+					"taints": cty.ListValEmpty(cty.Map(cty.String)),
+				}),
+				cty.ObjectVal(map[string]cty.Value{
+					"name": cty.StringVal("complex"),
+					"taints": cty.ListVal([]cty.Value{
+						cty.MapVal(map[string]cty.Value{
+							"key":   cty.StringVal("my_key"),
+							"value": cty.StringVal("my_value"),
+						}),
+					}),
+				}),
+			}),
+			``,
+		},
 
 		// complex types
 
@@ -713,6 +777,55 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 				}),
 			}),
 			``,
+		},
+		{
+			"list_with_nested_collections_dynamic_with_default",
+			cty.TupleVal([]cty.Value{
+				cty.ObjectVal(map[string]cty.Value{
+					"name": cty.StringVal("default"),
+				}),
+				cty.ObjectVal(map[string]cty.Value{
+					"name": cty.StringVal("complex"),
+					"taints": cty.ListVal([]cty.Value{
+						cty.MapVal(map[string]cty.Value{
+							"key":   cty.StringVal("my_key"),
+							"value": cty.StringVal("my_value"),
+						}),
+					}),
+				}),
+			}),
+			cty.ListVal([]cty.Value{
+				cty.ObjectVal(map[string]cty.Value{
+					"name":   cty.StringVal("default"),
+					"taints": cty.ListValEmpty(cty.Map(cty.String)),
+				}),
+				cty.ObjectVal(map[string]cty.Value{
+					"name": cty.StringVal("complex"),
+					"taints": cty.ListVal([]cty.Value{
+						cty.MapVal(map[string]cty.Value{
+							"key":   cty.StringVal("my_key"),
+							"value": cty.StringVal("my_value"),
+						}),
+					}),
+				}),
+			}),
+			``,
+		},
+		{
+			"invalid_nested_type",
+			cty.MapVal(map[string]cty.Value{
+				"mysql": cty.ObjectVal(map[string]cty.Value{
+					"rules": cty.ObjectVal(map[string]cty.Value{
+						"destination_addresses": cty.ListVal([]cty.Value{cty.StringVal("192.168.0.1")}),
+					}),
+				}),
+			}),
+			cty.UnknownVal(cty.Map(cty.Object(map[string]cty.Type{
+				"rules": cty.Map(cty.Object(map[string]cty.Type{
+					"destination_addresses": cty.List(cty.String),
+				})),
+			}))),
+			`Invalid value for input variable: Unsuitable value for var.invalid_nested_type set from outside of the configuration: incorrect map element type: attribute "rules": element "destination_addresses": object required.`,
 		},
 
 		// sensitive
@@ -995,12 +1108,14 @@ func TestEvalVariableValidations_jsonErrorMessageEdgeCase(t *testing.T) {
 		given    cty.Value
 		wantErr  []string
 		wantWarn []string
+		status   checks.Status
 	}{
 		// Valid variable validation declaration, assigned value which passes
 		// the condition generates no diagnostics.
 		{
 			varName: "valid",
 			given:   cty.StringVal("foo"),
+			status:  checks.StatusPass,
 		},
 		// Assigning a value which fails the condition generates an error
 		// message with the expression successfully evaluated.
@@ -1011,6 +1126,7 @@ func TestEvalVariableValidations_jsonErrorMessageEdgeCase(t *testing.T) {
 				"Invalid value for variable",
 				"Valid template string bar",
 			},
+			status: checks.StatusFail,
 		},
 		// Invalid variable validation declaration due to an unparseable
 		// template string. Assigning a value which passes the condition
@@ -1022,6 +1138,7 @@ func TestEvalVariableValidations_jsonErrorMessageEdgeCase(t *testing.T) {
 				"Validation error message expression is invalid",
 				"Missing expression; Expected the start of an expression, but found the end of the file.",
 			},
+			status: checks.StatusPass,
 		},
 		// Assigning a value which fails the condition generates an error
 		// message including the configured string interpreted as a literal
@@ -1037,6 +1154,7 @@ func TestEvalVariableValidations_jsonErrorMessageEdgeCase(t *testing.T) {
 				"Validation error message expression is invalid",
 				"Missing expression; Expected the start of an expression, but found the end of the file.",
 			},
+			status: checks.StatusFail,
 		},
 	}
 
@@ -1061,10 +1179,16 @@ func TestEvalVariableValidations_jsonErrorMessageEdgeCase(t *testing.T) {
 				}
 				return test.given
 			}
+			ctx.ChecksState = checks.NewState(cfg)
+			ctx.ChecksState.ReportCheckableObjects(varAddr.ConfigCheckable(), addrs.MakeSet[addrs.Checkable](varAddr))
 
 			gotDiags := evalVariableValidations(
 				varAddr, varCfg, nil, ctx,
 			)
+
+			if ctx.ChecksState.ObjectCheckStatus(varAddr) != test.status {
+				t.Errorf("expected check result %s but instead %s", test.status, ctx.ChecksState.ObjectCheckStatus(varAddr))
+			}
 
 			if len(test.wantErr) == 0 && len(test.wantWarn) == 0 {
 				if len(gotDiags) > 0 {
@@ -1146,12 +1270,14 @@ variable "bar" {
 		varName string
 		given   cty.Value
 		wantErr []string
+		status  checks.Status
 	}{
 		// Validations pass on a sensitive variable with an error message which
 		// would generate a sensitive value
 		{
 			varName: "foo",
 			given:   cty.StringVal("boop"),
+			status:  checks.StatusPass,
 		},
 		// Assigning a value which fails the condition generates a sensitive
 		// error message, which is elided and generates another error
@@ -1163,12 +1289,14 @@ variable "bar" {
 				"The error message included a sensitive value, so it will not be displayed.",
 				"Error message refers to sensitive values",
 			},
+			status: checks.StatusFail,
 		},
 		// Validations pass on a sensitive variable with a correctly defined
 		// error message
 		{
 			varName: "bar",
 			given:   cty.StringVal("boop"),
+			status:  checks.StatusPass,
 		},
 		// Assigning a value which fails the condition generates a nonsensitive
 		// error message, which is displayed
@@ -1179,6 +1307,7 @@ variable "bar" {
 				"Invalid value for variable",
 				"Bar must be 4 characters, not 3.",
 			},
+			status: checks.StatusFail,
 		},
 	}
 
@@ -1207,10 +1336,16 @@ variable "bar" {
 					return test.given
 				}
 			}
+			ctx.ChecksState = checks.NewState(cfg)
+			ctx.ChecksState.ReportCheckableObjects(varAddr.ConfigCheckable(), addrs.MakeSet[addrs.Checkable](varAddr))
 
 			gotDiags := evalVariableValidations(
 				varAddr, varCfg, nil, ctx,
 			)
+
+			if ctx.ChecksState.ObjectCheckStatus(varAddr) != test.status {
+				t.Errorf("expected check result %s but instead %s", test.status, ctx.ChecksState.ObjectCheckStatus(varAddr))
+			}
 
 			if len(test.wantErr) == 0 {
 				if len(gotDiags) > 0 {

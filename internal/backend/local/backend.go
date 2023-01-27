@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package local
 
 import (
@@ -178,6 +181,10 @@ func (b *Local) Configure(obj cty.Value) tfdiags.Diagnostics {
 	}
 
 	return diags
+}
+
+func (b *Local) ServiceDiscoveryAliases() ([]backend.HostAlias, error) {
+	return []backend.HostAlias{}, nil
 }
 
 func (b *Local) Workspaces() ([]string, error) {

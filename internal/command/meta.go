@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package command
 
 import (
@@ -103,6 +106,22 @@ type Meta struct {
 	// into the given directory.
 	PluginCacheDir string
 
+	// PluginCacheMayBreakDependencyLockFile is a temporary CLI configuration-based
+	// opt out for the behavior of only using the plugin cache dir if its
+	// contents match checksums recorded in the dependency lock file.
+	//
+	// This is an accommodation for those who currently essentially ignore the
+	// dependency lock file -- treating it only as transient working directory
+	// state -- and therefore don't care if the plugin cache dir causes the
+	// checksums inside to only be sufficient for the computer where Terraform
+	// is currently running.
+	//
+	// We intend to remove this exception again (making the CLI configuration
+	// setting a silent no-op) in future once we've improved the dependency
+	// lock file mechanism so that it's usable for everyone and there are no
+	// longer any compelling reasons for folks to not lock their dependencies.
+	PluginCacheMayBreakDependencyLockFile bool
+
 	// ProviderSource allows determining the available versions of a provider
 	// and determines where a distribution package for a particular
 	// provider version can be obtained.
@@ -111,6 +130,15 @@ type Meta struct {
 	// BrowserLauncher is used by commands that need to open a URL in a
 	// web browser.
 	BrowserLauncher webbrowser.Launcher
+
+	// A context.Context provided by the caller -- typically "package main" --
+	// which might be carrying telemetry-related metadata and so should be
+	// used when creating downstream traces, etc.
+	//
+	// This isn't guaranteed to be set, so use [Meta.CommandContext] to
+	// safely create a context for the entire execution of a command, which
+	// will be connected to this parent context if it's present.
+	CallerContext context.Context
 
 	// When this channel is closed, the command will be cancelled.
 	ShutdownCh <-chan struct{}
@@ -374,12 +402,23 @@ func (m *Meta) StdinPiped() bool {
 // InterruptibleContext returns a context.Context that will be cancelled
 // if the process is interrupted by a platform-specific interrupt signal.
 //
+// The typical way to use this is to pass the result of [Meta.CommandContext]
+// as the base context, but that's appropriate only if the interruptible
+// context is being created directly inside the "Run" method of a particular
+// command, to create a context representing the entire remaining runtime of
+// that command:
+//
 // As usual with cancelable contexts, the caller must always call the given
 // cancel function once all operations are complete in order to make sure
 // that the context resources will still be freed even if there is no
 // interruption.
-func (m *Meta) InterruptibleContext() (context.Context, context.CancelFunc) {
-	base := context.Background()
+//
+//	// This example is only for when using this function very early in
+//	// the "Run" method of a Command implementation. If you already have
+//	// an active context, pass that in as base instead.
+//	ctx, done := c.InterruptibleContext(c.CommandContext())
+//	defer done()
+func (m *Meta) InterruptibleContext(base context.Context) (context.Context, context.CancelFunc) {
 	if m.ShutdownCh == nil {
 		// If we're running in a unit testing context without a shutdown
 		// channel populated then we'll return an uncancelable channel.
@@ -396,6 +435,27 @@ func (m *Meta) InterruptibleContext() (context.Context, context.CancelFunc) {
 		}
 	}()
 	return ctx, cancel
+}
+
+// CommandContext returns the "root context" to use in the main Run function
+// of a command.
+//
+// This method is just a substitute for passing a context directly to the
+// "Run" method of a command, which we can't do because that API is owned by
+// mitchellh/cli rather than by Terraform. Use this only in situations
+// comparable to the context having been passed in as an argument to Run.
+//
+// If the caller (e.g. "package main") provided a context when it instantiated
+// the Meta then the returned context will inherit all of its values, deadlines,
+// etc. If the caller did not provide a context then the result is an inert
+// background context ready to be passed to other functions.
+func (m *Meta) CommandContext() context.Context {
+	if m.CallerContext == nil {
+		return context.Background()
+	}
+	// We just return the caller context directly for now, since we don't
+	// have anything to add to it.
+	return m.CallerContext
 }
 
 // RunOperation executes the given operation on the given backend, blocking

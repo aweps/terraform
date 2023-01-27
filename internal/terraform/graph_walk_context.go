@@ -1,8 +1,12 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package terraform
 
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/zclconf/go-cty/cty"
 
@@ -26,17 +30,19 @@ type ContextGraphWalker struct {
 
 	// Configurable values
 	Context            *Context
-	State              *states.SyncState       // Used for safe concurrent access to state
-	RefreshState       *states.SyncState       // Used for safe concurrent access to state
-	PrevRunState       *states.SyncState       // Used for safe concurrent access to state
-	Changes            *plans.ChangesSync      // Used for safe concurrent writes to changes
-	Checks             *checks.State           // Used for safe concurrent writes of checkable objects and their check results
-	InstanceExpander   *instances.Expander     // Tracks our gradual expansion of module and resource instances
+	State              *states.SyncState   // Used for safe concurrent access to state
+	RefreshState       *states.SyncState   // Used for safe concurrent access to state
+	PrevRunState       *states.SyncState   // Used for safe concurrent access to state
+	Changes            *plans.ChangesSync  // Used for safe concurrent writes to changes
+	Checks             *checks.State       // Used for safe concurrent writes of checkable objects and their check results
+	InstanceExpander   *instances.Expander // Tracks our gradual expansion of module and resource instances
+	Imports            []configs.Import
 	MoveResults        refactoring.MoveResults // Read-only record of earlier processing of move statements
 	Operation          walkOperation
 	StopContext        context.Context
 	RootVariableValues InputValues
 	Config             *configs.Config
+	PlanTimestamp      time.Time
 
 	// This is an output. Do not set this, nor read it while a graph walk
 	// is in progress.
@@ -48,7 +54,7 @@ type ContextGraphWalker struct {
 	variableValues     map[string]map[string]cty.Value
 	variableValuesLock sync.Mutex
 	providerCache      map[string]providers.Interface
-	providerSchemas    map[string]*ProviderSchema
+	providerSchemas    map[string]providers.ProviderSchema
 	providerLock       sync.Mutex
 	provisionerCache   map[string]provisioners.Interface
 	provisionerSchemas map[string]*configschema.Block
@@ -85,6 +91,7 @@ func (w *ContextGraphWalker) EvalContext() EvalContext {
 		Plugins:            w.Context.plugins,
 		VariableValues:     w.variableValues,
 		VariableValuesLock: &w.variableValuesLock,
+		PlanTimestamp:      w.PlanTimestamp,
 	}
 
 	ctx := &BuiltinEvalContext{
@@ -115,7 +122,7 @@ func (w *ContextGraphWalker) EvalContext() EvalContext {
 func (w *ContextGraphWalker) init() {
 	w.contexts = make(map[string]*BuiltinEvalContext)
 	w.providerCache = make(map[string]providers.Interface)
-	w.providerSchemas = make(map[string]*ProviderSchema)
+	w.providerSchemas = make(map[string]providers.ProviderSchema)
 	w.provisionerCache = make(map[string]provisioners.Interface)
 	w.provisionerSchemas = make(map[string]*configschema.Block)
 	w.variableValues = make(map[string]map[string]cty.Value)

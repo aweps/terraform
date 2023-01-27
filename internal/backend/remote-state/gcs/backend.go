@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 // Package gcs implements remote storage of state on Google Cloud Storage (GCS).
 package gcs
 
@@ -71,6 +74,7 @@ func New() backend.Backend {
 				Type:     schema.TypeString,
 				Optional: true,
 				DefaultFunc: schema.MultiEnvDefaultFunc([]string{
+					"GOOGLE_BACKEND_IMPERSONATE_SERVICE_ACCOUNT",
 					"GOOGLE_IMPERSONATE_SERVICE_ACCOUNT",
 				}, nil),
 				Description: "The service account to impersonate for all Google API Calls",

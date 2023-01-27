@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package terraform
 
 import (
@@ -43,7 +46,7 @@ type MockEvalContext struct {
 
 	ProviderSchemaCalled bool
 	ProviderSchemaAddr   addrs.AbsProviderConfig
-	ProviderSchemaSchema *ProviderSchema
+	ProviderSchemaSchema providers.ProviderSchema
 	ProviderSchemaError  error
 
 	CloseProviderCalled   bool
@@ -187,7 +190,7 @@ func (c *MockEvalContext) Provider(addr addrs.AbsProviderConfig) providers.Inter
 	return c.ProviderProvider
 }
 
-func (c *MockEvalContext) ProviderSchema(addr addrs.AbsProviderConfig) (*ProviderSchema, error) {
+func (c *MockEvalContext) ProviderSchema(addr addrs.AbsProviderConfig) (providers.ProviderSchema, error) {
 	c.ProviderSchemaCalled = true
 	c.ProviderSchemaAddr = addr
 	return c.ProviderSchemaSchema, c.ProviderSchemaError
@@ -319,7 +322,7 @@ func (c *MockEvalContext) installSimpleEval() {
 	}
 }
 
-func (c *MockEvalContext) EvaluationScope(self addrs.Referenceable, keyData InstanceKeyEvalData) *lang.Scope {
+func (c *MockEvalContext) EvaluationScope(self addrs.Referenceable, source addrs.Referenceable, keyData InstanceKeyEvalData) *lang.Scope {
 	c.EvaluationScopeCalled = true
 	c.EvaluationScopeSelf = self
 	c.EvaluationScopeKeyData = keyData

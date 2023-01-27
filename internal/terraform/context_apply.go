@@ -1,15 +1,19 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package terraform
 
 import (
 	"fmt"
 	"log"
 
+	"github.com/zclconf/go-cty/cty"
+
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/tfdiags"
-	"github.com/zclconf/go-cty/cty"
 )
 
 // Apply performs the actions described by the given Plan object and returns
@@ -35,6 +39,19 @@ func (c *Context) Apply(plan *plans.Plan, config *configs.Config) (*states.State
 		return nil, diags
 	}
 
+	for _, rc := range plan.Changes.Resources {
+		// Import is a no-op change during an apply (all the real action happens during the plan) but we'd
+		// like to show some helpful output that mirrors the way we show other changes.
+		if rc.Importing != nil {
+			for _, h := range c.hooks {
+				// In future, we may need to call PostApplyImport separately elsewhere in the apply
+				// operation. For now, though, we'll call Pre and Post hooks together.
+				h.PreApplyImport(rc.Addr, *rc.Importing)
+				h.PostApplyImport(rc.Addr, *rc.Importing)
+			}
+		}
+	}
+
 	graph, operation, diags := c.applyGraph(plan, config, true)
 	if diags.HasErrors() {
 		return nil, diags
@@ -50,6 +67,9 @@ func (c *Context) Apply(plan *plans.Plan, config *configs.Config) (*states.State
 		// because that will tell us which checkable objects we're expecting
 		// to see updated results from during the apply step.
 		PlanTimeCheckResults: plan.Checks,
+
+		// We also want to propagate the timestamp from the plan file.
+		PlanTimeTimestamp: plan.Timestamp,
 	})
 	diags = diags.Append(walker.NonFatalDiagnostics)
 	diags = diags.Append(walkDiags)
@@ -157,6 +177,7 @@ func (c *Context) applyGraph(plan *plans.Plan, config *configs.Config, validate 
 		Targets:            plan.TargetAddrs,
 		ForceReplace:       plan.ForceReplaceAddrs,
 		Operation:          operation,
+		ExternalReferences: plan.ExternalReferences,
 	}).Build(addrs.RootModuleInstance)
 	diags = diags.Append(moreDiags)
 	if moreDiags.HasErrors() {

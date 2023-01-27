@@ -1,13 +1,18 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package terraform
 
 import (
 	"fmt"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/zclconf/go-cty/cty"
+
+	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/lang/marks"
 	"github.com/hashicorp/terraform/internal/tfdiags"
-	"github.com/zclconf/go-cty/cty"
 )
 
 // evaluateForEachExpression is our standard mechanism for interpreting an
@@ -41,9 +46,9 @@ func evaluateForEachExpressionValue(expr hcl.Expression, ctx EvalContext, allowU
 		return nullMap, diags
 	}
 
-	refs, moreDiags := lang.ReferencesInExpr(expr)
+	refs, moreDiags := lang.ReferencesInExpr(addrs.ParseRef, expr)
 	diags = diags.Append(moreDiags)
-	scope := ctx.EvaluationScope(nil, EvalDataForNoInstanceKey)
+	scope := ctx.EvaluationScope(nil, nil, EvalDataForNoInstanceKey)
 	var hclCtx *hcl.EvalContext
 	if scope != nil {
 		hclCtx, moreDiags = scope.EvalContext(refs)

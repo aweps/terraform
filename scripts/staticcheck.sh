@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright (c) HashiCorp, Inc.
+# SPDX-License-Identifier: BUSL-1.1
+
 
 echo "==> Checking that code complies with static analysis requirements..."
 # Skip legacy code which is frozen, and can be removed once we can refactor the

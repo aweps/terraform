@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: BUSL-1.1
+
 package terraform
 
 import (
@@ -6,23 +9,21 @@ import (
 	"log"
 	"sync"
 
+	"github.com/hashicorp/hcl/v2"
+	"github.com/zclconf/go-cty/cty"
+
+	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/checks"
+	"github.com/hashicorp/terraform/internal/configs/configschema"
 	"github.com/hashicorp/terraform/internal/instances"
+	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/provisioners"
 	"github.com/hashicorp/terraform/internal/refactoring"
-	"github.com/hashicorp/terraform/version"
-
 	"github.com/hashicorp/terraform/internal/states"
-
-	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/terraform/internal/configs/configschema"
-	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/tfdiags"
-
-	"github.com/hashicorp/terraform/internal/addrs"
-	"github.com/zclconf/go-cty/cty"
+	"github.com/hashicorp/terraform/version"
 )
 
 // BuiltinEvalContext is an EvalContext implementation that is used by
@@ -148,7 +149,22 @@ func (ctx *BuiltinEvalContext) Provider(addr addrs.AbsProviderConfig) providers.
 	return ctx.ProviderCache[addr.String()]
 }
 
-func (ctx *BuiltinEvalContext) ProviderSchema(addr addrs.AbsProviderConfig) (*ProviderSchema, error) {
+func (ctx *BuiltinEvalContext) ProviderSchema(addr addrs.AbsProviderConfig) (providers.ProviderSchema, error) {
+	// first see if we have already have an initialized provider to avoid
+	// re-loading it only for the schema
+	p := ctx.Provider(addr)
+	if p != nil {
+		resp := p.GetProviderSchema()
+		// convert any diagnostics here in case this is the first call
+		// FIXME: better control provider instantiation so we can be sure this
+		// won't be the first call to ProviderSchema
+		var err error
+		if resp.Diagnostics.HasErrors() {
+			err = resp.Diagnostics.ErrWithWarnings()
+		}
+		return resp, err
+	}
+
 	return ctx.Plugins.ProviderSchema(addr.Provider)
 }
 
@@ -177,16 +193,6 @@ func (ctx *BuiltinEvalContext) ConfigureProvider(addr addrs.AbsProviderConfig, c
 	p := ctx.Provider(addr)
 	if p == nil {
 		diags = diags.Append(fmt.Errorf("%s not initialized", addr))
-		return diags
-	}
-
-	providerSchema, err := ctx.ProviderSchema(addr)
-	if err != nil {
-		diags = diags.Append(fmt.Errorf("failed to read schema for %s: %s", addr, err))
-		return diags
-	}
-	if providerSchema == nil {
-		diags = diags.Append(fmt.Errorf("schema for %s is not available", addr))
 		return diags
 	}
 
@@ -270,7 +276,7 @@ func (ctx *BuiltinEvalContext) CloseProvisioners() error {
 
 func (ctx *BuiltinEvalContext) EvaluateBlock(body hcl.Body, schema *configschema.Block, self addrs.Referenceable, keyData InstanceKeyEvalData) (cty.Value, hcl.Body, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
-	scope := ctx.EvaluationScope(self, keyData)
+	scope := ctx.EvaluationScope(self, nil, keyData)
 	body, evalDiags := scope.ExpandBlock(body, schema)
 	diags = diags.Append(evalDiags)
 	val, evalDiags := scope.EvalBlock(body, schema)
@@ -279,7 +285,7 @@ func (ctx *BuiltinEvalContext) EvaluateBlock(body hcl.Body, schema *configschema
 }
 
 func (ctx *BuiltinEvalContext) EvaluateExpr(expr hcl.Expression, wantType cty.Type, self addrs.Referenceable) (cty.Value, tfdiags.Diagnostics) {
-	scope := ctx.EvaluationScope(self, EvalDataForNoInstanceKey)
+	scope := ctx.EvaluationScope(self, nil, EvalDataForNoInstanceKey)
 	return scope.EvalExpr(expr, wantType)
 }
 
@@ -397,7 +403,7 @@ func (ctx *BuiltinEvalContext) EvaluateReplaceTriggeredBy(expr hcl.Expression, r
 	return ref, replace, diags
 }
 
-func (ctx *BuiltinEvalContext) EvaluationScope(self addrs.Referenceable, keyData instances.RepetitionData) *lang.Scope {
+func (ctx *BuiltinEvalContext) EvaluationScope(self addrs.Referenceable, source addrs.Referenceable, keyData InstanceKeyEvalData) *lang.Scope {
 	if !ctx.pathSet {
 		panic("context path not set")
 	}
@@ -407,7 +413,7 @@ func (ctx *BuiltinEvalContext) EvaluationScope(self addrs.Referenceable, keyData
 		InstanceKeyData: keyData,
 		Operation:       ctx.Evaluator.Operation,
 	}
-	scope := ctx.Evaluator.Scope(data, self)
+	scope := ctx.Evaluator.Scope(data, self, source)
 
 	// ctx.PathValue is the path of the module that contains whatever
 	// expression the caller will be trying to evaluate, so this will
