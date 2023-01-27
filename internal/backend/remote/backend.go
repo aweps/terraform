@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package remote
 
 import (
@@ -36,6 +39,7 @@ const (
 	defaultParallelism = 10
 	stateServiceID     = "state.v2"
 	tfeServiceID       = "tfe.v2.1"
+	genericHostname    = "localterraform.com"
 )
 
 // Remote is an implementation of EnhancedBackend that performs all
@@ -194,6 +198,23 @@ func (b *Remote) PrepareConfig(obj cty.Value) (cty.Value, tfdiags.Diagnostics) {
 	return obj, diags
 }
 
+// configureGenericHostname aliases the remote backend hostname configuration
+// as a generic "localterraform.com" hostname. This was originally added as a
+// Terraform Enterprise feature and is useful for re-using whatever the
+// Cloud/Enterprise backend host is in nested module sources in order
+// to prevent code churn when re-using config between multiple
+// Terraform Enterprise environments.
+func (b *Remote) configureGenericHostname() {
+	// This won't be an error for the given constant value
+	genericHost, _ := svchost.ForComparison(genericHostname)
+
+	// This won't be an error because, by this time, the hostname has been parsed and
+	// service discovery requests made against it.
+	targetHost, _ := svchost.ForComparison(b.hostname)
+
+	b.services.Alias(genericHost, targetHost)
+}
+
 // Configure implements backend.Enhanced.
 func (b *Remote) Configure(obj cty.Value) tfdiags.Diagnostics {
 	var diags tfdiags.Diagnostics
@@ -295,6 +316,8 @@ func (b *Remote) Configure(obj cty.Value) tfdiags.Diagnostics {
 		))
 		return diags
 	}
+
+	b.configureGenericHostname()
 
 	cfg := &tfe.Config{
 		Address:      service.String(),
@@ -671,7 +694,18 @@ func (b *Remote) StateMgr(name string) (statemgr.Full, error) {
 		runID: os.Getenv("TFE_RUN_ID"),
 	}
 
-	return &remote.State{Client: client}, nil
+	return &remote.State{
+		Client: client,
+
+		// client.runID will be set if we're running a the Terraform Cloud
+		// or Terraform Enterprise remote execution environment, in which
+		// case we'll disable intermediate snapshots to avoid extra storage
+		// costs for Terraform Enterprise customers.
+		// Other implementations of the remote state protocol should not run
+		// in contexts where there's a "TFE Run ID" and so are not affected
+		// by this special case.
+		DisableIntermediateSnapshots: client.runID != "",
+	}, nil
 }
 
 func isLocalExecutionMode(execMode string) bool {

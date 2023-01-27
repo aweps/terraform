@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package terraform
 
 import (
@@ -20,12 +23,11 @@ import (
 // nodeExpandOutput is the placeholder for a non-root module output that has
 // not yet had its module path expanded.
 type nodeExpandOutput struct {
-	Addr         addrs.OutputValue
-	Module       addrs.Module
-	Config       *configs.Output
-	PlanDestroy  bool
-	ApplyDestroy bool
-	RefreshOnly  bool
+	Addr        addrs.OutputValue
+	Module      addrs.Module
+	Config      *configs.Output
+	Destroying  bool
+	RefreshOnly bool
 
 	// Planning is set to true when this node is in a graph that was produced
 	// by the plan graph builder, as opposed to the apply graph builder.
@@ -100,13 +102,13 @@ func (n *nodeExpandOutput) DynamicExpand(ctx EvalContext) (*Graph, error) {
 
 		var node dag.Vertex
 		switch {
-		case module.IsRoot() && (n.PlanDestroy || n.ApplyDestroy):
+		case module.IsRoot() && n.Destroying:
 			node = &NodeDestroyableOutput{
 				Addr:     absAddr,
 				Planning: n.Planning,
 			}
 
-		case n.PlanDestroy:
+		case n.Destroying:
 			// nothing is done here for non-root outputs
 			continue
 
@@ -116,7 +118,7 @@ func (n *nodeExpandOutput) DynamicExpand(ctx EvalContext) (*Graph, error) {
 				Config:       n.Config,
 				Change:       change,
 				RefreshOnly:  n.RefreshOnly,
-				DestroyApply: n.ApplyDestroy,
+				DestroyApply: n.Destroying,
 				Planning:     n.Planning,
 			}
 		}
@@ -183,7 +185,7 @@ func (n *nodeExpandOutput) ReferenceOutside() (selfPath, referencePath addrs.Mod
 // GraphNodeReferencer
 func (n *nodeExpandOutput) References() []*addrs.Reference {
 	// DestroyNodes do not reference anything.
-	if n.Module.IsRoot() && n.ApplyDestroy {
+	if n.Module.IsRoot() && n.Destroying {
 		return nil
 	}
 
@@ -513,10 +515,6 @@ func (n *NodeDestroyableOutput) DotNode(name string, opts *dag.DotOpts) *dag.Dot
 }
 
 func (n *NodeApplyableOutput) setValue(state *states.SyncState, changes *plans.ChangesSync, val cty.Value) {
-	// If we have an active changeset then we'll first replicate the value in
-	// there and lookup the prior value in the state. This is used in
-	// preference to the state where present, since it *is* able to represent
-	// unknowns, while the state cannot.
 	if changes != nil && n.Planning {
 		// if this is a root module, try to get a before value from the state for
 		// the diff
@@ -538,8 +536,8 @@ func (n *NodeApplyableOutput) setValue(state *states.SyncState, changes *plans.C
 			}
 		}
 
-		// We will not show the value is either the before or after are marked
-		// as sensitivity. We can show the value again once sensitivity is
+		// We will not show the value if either the before or after are marked
+		// as sensitive. We can show the value again once sensitivity is
 		// removed from both the config and the state.
 		sensitiveChange := sensitiveBefore || n.Config.Sensitive
 
@@ -592,30 +590,23 @@ func (n *NodeApplyableOutput) setValue(state *states.SyncState, changes *plans.C
 		changes.RemoveOutputChange(n.Addr)
 	}
 
-	if val.IsKnown() && !val.IsNull() {
-		// The state itself doesn't represent unknown values, so we null them
-		// out here and then we'll save the real unknown value in the planned
-		// changeset below, if we have one on this graph walk.
-		log.Printf("[TRACE] setValue: Saving value for %s in state", n.Addr)
-
-		sensitive := n.Config.Sensitive
-		unmarkedVal, valueMarks := val.UnmarkDeep()
-
-		// If the evaluate value contains sensitive marks, the output has no
-		// choice but to declare itself as "sensitive".
-		for mark := range valueMarks {
-			if mark == marks.Sensitive {
-				sensitive = true
-				break
-			}
-		}
-
-		stateVal := cty.UnknownAsNull(unmarkedVal)
-		state.SetOutputValue(n.Addr, stateVal, sensitive)
-
-	} else {
+	// Null outputs must be saved for modules so that they can still be
+	// evaluated. Null root outputs are removed entirely, which is always fine
+	// because they can't be referenced by anything else in the configuration.
+	if n.Addr.Module.IsRoot() && val.IsNull() {
 		log.Printf("[TRACE] setValue: Removing %s from state (it is now null)", n.Addr)
 		state.RemoveOutputValue(n.Addr)
+		return
 	}
 
+	log.Printf("[TRACE] setValue: Saving value for %s in state", n.Addr)
+
+	// non-root outputs need to keep sensitive marks for evaluation, but are
+	// not serialized.
+	if n.Addr.Module.IsRoot() {
+		val, _ = val.UnmarkDeep()
+		val = cty.UnknownAsNull(val)
+	}
+
+	state.SetOutputValue(n.Addr, val, n.Config.Sensitive)
 }

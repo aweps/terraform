@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package cloud
 
 import (
@@ -97,8 +100,14 @@ func (b *Cloud) runTaskStage(ctx *IntegrationContext, output IntegrationOutputWr
 		case tfe.TaskStagePending:
 			// Waiting for it to start
 			return true, nil
+		case tfe.TaskStageRunning:
+			if _, e := processSummarizers(ctx, output, stage, summarizers, errs); e != nil {
+				errs = e
+			}
+			// not a terminal status so we continue to poll
+			return true, nil
 		// Note: Terminal statuses need to print out one last time just in case
-		case tfe.TaskStageRunning, tfe.TaskStagePassed:
+		case tfe.TaskStagePassed:
 			ok, e := processSummarizers(ctx, output, stage, summarizers, errs)
 			if e != nil {
 				errs = e
@@ -176,6 +185,8 @@ func (b *Cloud) processStageOverrides(context *IntegrationContext, output Integr
 	if err != errRunOverridden {
 		if _, err = b.client.TaskStages.Override(context.StopContext, taskStageID, tfe.TaskStageOverrideOptions{}); err != nil {
 			return false, generalError(fmt.Sprintf("Failed to override policy check.\n%s", runUrl), err)
+		} else {
+			return true, nil
 		}
 	} else {
 		output.Output(fmt.Sprintf("The run needs to be manually overridden or discarded.\n%s\n", runUrl))

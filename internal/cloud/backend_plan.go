@@ -1,8 +1,12 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package cloud
 
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,12 +14,18 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	tfe "github.com/hashicorp/go-tfe"
+	version "github.com/hashicorp/go-version"
+
 	"github.com/hashicorp/terraform/internal/backend"
+	"github.com/hashicorp/terraform/internal/command/jsonformat"
+	"github.com/hashicorp/terraform/internal/configs"
+	"github.com/hashicorp/terraform/internal/genconfig"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/tfdiags"
 )
@@ -74,6 +84,10 @@ func (b *Cloud) opPlan(stopCtx, cancelCtx context.Context, op *backend.Operation
 				`flag or create a single empty configuration file. Otherwise, please create `+
 				`a Terraform configuration file in the path being executed and try again.`,
 		))
+	}
+
+	if len(op.GenerateConfigOut) > 0 {
+		diags = diags.Append(genconfig.ValidateTargetFile(op.GenerateConfigOut))
 	}
 
 	// Return if there are any errors.
@@ -229,6 +243,7 @@ in order to capture the filesystem context the remote workspace expects:
 	if configDiags.HasErrors() {
 		return nil, fmt.Errorf("error loading config with snapshot: %w", configDiags.Errs()[0])
 	}
+
 	variables, varDiags := ParseCloudRunVariables(op.Variables, config.Module.Variables)
 
 	if varDiags.HasErrors() {
@@ -243,6 +258,10 @@ in order to capture the filesystem context the remote workspace expects:
 		})
 	}
 	runOptions.Variables = runVariables
+
+	if len(op.GenerateConfigOut) > 0 {
+		runOptions.AllowConfigGeneration = tfe.Bool(true)
+	}
 
 	r, err := b.client.Runs.Create(stopCtx, runOptions)
 	if err != nil {
@@ -291,6 +310,11 @@ in order to capture the filesystem context the remote workspace expects:
 			runHeader, b.hostname, b.organization, op.Workspace, r.ID)) + "\n"))
 	}
 
+	// Render any warnings that were raised during run creation
+	if err := b.renderRunWarnings(stopCtx, b.client, r.ID); err != nil {
+		return r, err
+	}
+
 	// Retrieve the run to get task stages.
 	// Task Stages are calculated upfront so we only need to call this once for the run.
 	taskStages, err := b.runTaskStages(stopCtx, b.client, r.ID)
@@ -309,31 +333,9 @@ in order to capture the filesystem context the remote workspace expects:
 		return r, err
 	}
 
-	logs, err := b.client.Plans.Logs(stopCtx, r.Plan.ID)
+	err = b.renderPlanLogs(stopCtx, op, r)
 	if err != nil {
-		return r, generalError("Failed to retrieve logs", err)
-	}
-	reader := bufio.NewReaderSize(logs, 64*1024)
-
-	if b.CLI != nil {
-		for next := true; next; {
-			var l, line []byte
-
-			for isPrefix := true; isPrefix; {
-				l, isPrefix, err = reader.ReadLine()
-				if err != nil {
-					if err != io.EOF {
-						return r, generalError("Failed to read logs", err)
-					}
-					next = false
-				}
-				line = append(line, l...)
-			}
-
-			if next || len(line) > 0 {
-				b.CLI.Output(b.Colorize().Color(string(line)))
-			}
-		}
+		return r, err
 	}
 
 	// Retrieve the run to get its current status.
@@ -371,6 +373,231 @@ in order to capture the filesystem context the remote workspace expects:
 	}
 
 	return r, nil
+}
+
+// AssertImportCompatible errors if the user is attempting to use configuration-
+// driven import and the version of the agent or API is too low to support it.
+func (b *Cloud) AssertImportCompatible(config *configs.Config) error {
+	// Check TFC_RUN_ID is populated, indicating we are running in a remote TFC
+	// execution environment.
+	if len(config.Module.Import) > 0 && os.Getenv("TFC_RUN_ID") != "" {
+		// First, check the remote API version is high enough.
+		currentAPIVersion, err := version.NewVersion(b.client.RemoteAPIVersion())
+		if err != nil {
+			return fmt.Errorf("Error parsing remote API version. To proceed, please remove any import blocks from your config. Please report the following error to the Terraform team: %s", err)
+		}
+		desiredAPIVersion, _ := version.NewVersion("2.6")
+		if currentAPIVersion.LessThan(desiredAPIVersion) {
+			return fmt.Errorf("Import blocks are not supported in this version of Terraform Enterprise. Please remove any import blocks from your config or upgrade Terraform Enterprise.")
+		}
+
+		// Second, check the agent version is high enough.
+		agentEnv, isSet := os.LookupEnv("TFC_AGENT_VERSION")
+		if !isSet {
+			return fmt.Errorf("Error reading TFC agent version. To proceed, please remove any import blocks from your config. Please report the following error to the Terraform team: TFC_AGENT_VERSION not present.")
+		}
+		currentAgentVersion, err := version.NewVersion(agentEnv)
+		if err != nil {
+			return fmt.Errorf("Error parsing TFC agent version. To proceed, please remove any import blocks from your config. Please report the following error to the Terraform team: %s", err)
+		}
+		desiredAgentVersion, _ := version.NewVersion("1.10")
+		if currentAgentVersion.LessThan(desiredAgentVersion) {
+			return fmt.Errorf("Import blocks are not supported in this version of the Terraform Cloud Agent. You are using agent version %s, but this feature requires version %s. Please remove any import blocks from your config or upgrade your agent.", currentAgentVersion, desiredAgentVersion)
+		}
+	}
+	return nil
+}
+
+// renderPlanLogs reads the streamed plan JSON logs and calls the JSON Plan renderer (jsonformat.RenderPlan) to
+// render the plan output. The plan output is fetched from the redacted output endpoint.
+func (b *Cloud) renderPlanLogs(ctx context.Context, op *backend.Operation, run *tfe.Run) error {
+	logs, err := b.client.Plans.Logs(ctx, run.Plan.ID)
+	if err != nil {
+		return err
+	}
+
+	if b.CLI != nil {
+		reader := bufio.NewReaderSize(logs, 64*1024)
+
+		for next := true; next; {
+			var l, line []byte
+			var err error
+
+			for isPrefix := true; isPrefix; {
+				l, isPrefix, err = reader.ReadLine()
+				if err != nil {
+					if err != io.EOF {
+						return generalError("Failed to read logs", err)
+					}
+					next = false
+				}
+
+				line = append(line, l...)
+			}
+
+			if next || len(line) > 0 {
+				log := &jsonformat.JSONLog{}
+				if err := json.Unmarshal(line, log); err != nil {
+					// If we can not parse the line as JSON, we will simply
+					// print the line. This maintains backwards compatibility for
+					// users who do not wish to enable structured output in their
+					// workspace.
+					b.CLI.Output(string(line))
+					continue
+				}
+
+				// We will ignore plan output, change summary or outputs logs
+				// during the plan phase.
+				if log.Type == jsonformat.LogOutputs ||
+					log.Type == jsonformat.LogChangeSummary ||
+					log.Type == jsonformat.LogPlannedChange {
+					continue
+				}
+
+				if b.renderer != nil {
+					// Otherwise, we will print the log
+					err := b.renderer.RenderLog(log)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+
+	// Get the run's current status and include the workspace and plan. We will check if
+	// the run has errored, if structured output is enabled, and if the plan
+	run, err = b.client.Runs.ReadWithOptions(ctx, run.ID, &tfe.RunReadOptions{
+		Include: []tfe.RunIncludeOpt{tfe.RunWorkspace, tfe.RunPlan},
+	})
+	if err != nil {
+		return err
+	}
+
+	// If the run was errored, canceled, or discarded we will not resume the rest
+	// of this logic and attempt to render the plan, except in certain special circumstances
+	// where the plan errored but successfully generated configuration during an
+	// import operation. In that case, we need to keep going so we can load the JSON plan
+	// and use it to write the generated config to the specified output file.
+	shouldGenerateConfig := shouldGenerateConfig(op.GenerateConfigOut, run)
+	shouldRenderPlan := shouldRenderPlan(run)
+	if !shouldRenderPlan && !shouldGenerateConfig {
+		// We won't return an error here since we need to resume the logic that
+		// follows after rendering the logs (run tasks, cost estimation, etc.)
+		return nil
+	}
+
+	// Fetch the redacted JSON plan if we need it for either rendering the plan
+	// or writing out generated configuration.
+	var redactedPlan *jsonformat.Plan
+	renderSRO, err := b.shouldRenderStructuredRunOutput(run)
+	if err != nil {
+		return err
+	}
+	if renderSRO || shouldGenerateConfig {
+		redactedPlan, err = readRedactedPlan(ctx, b.client.BaseURL(), b.token, run.Plan.ID)
+		if err != nil {
+			return generalError("Failed to read JSON plan", err)
+		}
+	}
+
+	// Write any generated config before rendering the plan, so we can stop in case of errors
+	if shouldGenerateConfig {
+		diags := maybeWriteGeneratedConfig(redactedPlan, op.GenerateConfigOut)
+		if diags.HasErrors() {
+			return diags.Err()
+		}
+	}
+
+	// Only generate the human readable output from the plan if structured run output is
+	// enabled. Otherwise we risk duplicate plan output since plan output may also be
+	// shown in the streamed logs.
+	if shouldRenderPlan && renderSRO {
+		b.renderer.RenderHumanPlan(*redactedPlan, op.PlanMode)
+	}
+
+	return nil
+}
+
+// maybeWriteGeneratedConfig attempts to write any generated configuration from the JSON plan
+// to the specified output file, if generated configuration exists and the correct flag was
+// passed to the plan command.
+func maybeWriteGeneratedConfig(plan *jsonformat.Plan, out string) (diags tfdiags.Diagnostics) {
+	if genconfig.ShouldWriteConfig(out) {
+		diags := genconfig.ValidateTargetFile(out)
+		if diags.HasErrors() {
+			return diags
+		}
+
+		var writer io.Writer
+		for _, c := range plan.ResourceChanges {
+			change := genconfig.Change{
+				Addr:            c.Address,
+				GeneratedConfig: c.Change.GeneratedConfig,
+			}
+			if c.Change.Importing != nil {
+				change.ImportID = c.Change.Importing.ID
+			}
+
+			var moreDiags tfdiags.Diagnostics
+			writer, _, moreDiags = change.MaybeWriteConfig(writer, out)
+			if moreDiags.HasErrors() {
+				return diags.Append(moreDiags)
+			}
+		}
+	}
+
+	return diags
+}
+
+// shouldRenderStructuredRunOutput ensures the remote workspace has structured
+// run output enabled and, if using Terraform Enterprise, ensures it is a release
+// that supports enabling SRO for CLI-driven runs. The plan output will have
+// already been rendered when the logs were read if this wasn't the case.
+func (b *Cloud) shouldRenderStructuredRunOutput(run *tfe.Run) (bool, error) {
+	if b.renderer == nil || !run.Workspace.StructuredRunOutputEnabled {
+		return false, nil
+	}
+
+	// If the cloud backend is configured against TFC, we only require that
+	// the workspace has structured run output enabled.
+	if b.client.IsCloud() && run.Workspace.StructuredRunOutputEnabled {
+		return true, nil
+	}
+
+	// If the cloud backend is configured against TFE, ensure the release version
+	// supports enabling SRO for CLI runs.
+	if b.client.IsEnterprise() {
+		tfeVersion := b.client.RemoteTFEVersion()
+		if tfeVersion != "" {
+			v := strings.Split(tfeVersion[1:], "-")
+			releaseDate, err := strconv.Atoi(v[0])
+			if err != nil {
+				return false, err
+			}
+
+			// Any release older than 202302-1 will not support enabling SRO for
+			// CLI-driven runs
+			if releaseDate < 202302 {
+				return false, nil
+			} else if run.Workspace.StructuredRunOutputEnabled {
+				return true, nil
+			}
+		}
+	}
+
+	// Version of TFE is unknowable
+	return false, nil
+}
+
+func shouldRenderPlan(run *tfe.Run) bool {
+	return !(run.Status == tfe.RunErrored || run.Status == tfe.RunCanceled ||
+		run.Status == tfe.RunDiscarded)
+}
+
+func shouldGenerateConfig(out string, run *tfe.Run) bool {
+	return (run.Plan.Status == tfe.PlanErrored || run.Plan.Status == tfe.PlanFinished) &&
+		run.Plan.GeneratedConfiguration && len(out) > 0
 }
 
 const planDefaultHeader = `

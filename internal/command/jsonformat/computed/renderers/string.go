@@ -1,7 +1,11 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package renderers
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/hashicorp/terraform/internal/command/jsonformat/computed"
@@ -12,11 +16,15 @@ type evaluatedString struct {
 	Json   interface{}
 
 	IsMultiline bool
+	IsNull      bool
 }
 
 func evaluatePrimitiveString(value interface{}, opts computed.RenderHumanOpts) evaluatedString {
 	if value == nil {
-		return evaluatedString{String: opts.Colorize.Color("[dark_gray]null[reset]")}
+		return evaluatedString{
+			String: opts.Colorize.Color("[dark_gray]null[reset]"),
+			IsNull: true,
+		}
 	}
 
 	str := value.(string)
@@ -41,4 +49,11 @@ func evaluatePrimitiveString(value interface{}, opts computed.RenderHumanOpts) e
 	return evaluatedString{
 		String: str,
 	}
+}
+
+func (e evaluatedString) RenderSimple() string {
+	if e.IsNull {
+		return e.String
+	}
+	return fmt.Sprintf("%q", e.String)
 }
