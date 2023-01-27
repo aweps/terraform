@@ -444,6 +444,12 @@ const (
 	// depends on a managed resource instance which has its own changes
 	// pending.
 	ResourceInstanceReadBecauseDependencyPending ResourceInstanceChangeActionReason = '!'
+
+	// ResourceInstanceReadBecauseCheckNested indicates that the resource must
+	// be read during apply (as well as during planning) because it is inside
+	// a check block and when the check assertions execute we want them to use
+	// the most up-to-date data.
+	ResourceInstanceReadBecauseCheckNested ResourceInstanceChangeActionReason = '#'
 )
 
 // OutputChange describes a change to an output value.
@@ -499,6 +505,10 @@ type Change struct {
 	// either as the values themselves or as nested elements within known
 	// collections/structures.
 	Before, After cty.Value
+
+	// Importing is true if the resource is being imported as part of the
+	// change.
+	Importing bool
 }
 
 // Encode produces a variant of the reciever that has its change values
