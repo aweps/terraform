@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/terraform/internal/command/format"
 	"github.com/hashicorp/terraform/internal/command/jsonformat/computed"
 	"github.com/hashicorp/terraform/internal/command/jsonformat/differ"
+	"github.com/hashicorp/terraform/internal/command/jsonformat/structured"
 	"github.com/hashicorp/terraform/internal/command/jsonplan"
 	"github.com/hashicorp/terraform/internal/command/jsonprovider"
 	"github.com/hashicorp/terraform/internal/command/jsonstate"
@@ -28,20 +29,21 @@ type JSONLog struct {
 }
 
 const (
-	LogVersion           JSONLogType = "version"
+	LogApplyComplete     JSONLogType = "apply_complete"
+	LogApplyErrored      JSONLogType = "apply_errored"
+	LogApplyStart        JSONLogType = "apply_start"
+	LogChangeSummary     JSONLogType = "change_summary"
 	LogDiagnostic        JSONLogType = "diagnostic"
 	LogPlannedChange     JSONLogType = "planned_change"
-	LogRefreshStart      JSONLogType = "refresh_start"
-	LogRefreshComplete   JSONLogType = "refresh_complete"
-	LogApplyStart        JSONLogType = "apply_start"
-	LogApplyErrored      JSONLogType = "apply_errored"
-	LogApplyComplete     JSONLogType = "apply_complete"
-	LogChangeSummary     JSONLogType = "change_summary"
-	LogProvisionStart    JSONLogType = "provision_start"
-	LogProvisionProgress JSONLogType = "provision_progress"
 	LogProvisionComplete JSONLogType = "provision_complete"
 	LogProvisionErrored  JSONLogType = "provision_errored"
+	LogProvisionProgress JSONLogType = "provision_progress"
+	LogProvisionStart    JSONLogType = "provision_start"
 	LogOutputs           JSONLogType = "outputs"
+	LogRefreshComplete   JSONLogType = "refresh_complete"
+	LogRefreshStart      JSONLogType = "refresh_start"
+	LogResourceDrift     JSONLogType = "resource_drift"
+	LogVersion           JSONLogType = "version"
 )
 
 type Renderer struct {
@@ -58,7 +60,7 @@ func (renderer Renderer) RenderHumanPlan(plan Plan, mode plans.Mode, opts ...Pla
 	// version differences. This should work for alpha testing in the meantime.
 	if plan.PlanFormatVersion != jsonplan.FormatVersion || plan.ProviderFormatVersion != jsonprovider.FormatVersion {
 		renderer.Streams.Println(format.WordWrap(
-			renderer.Colorize.Color("\n[bold][red]Warning:[reset][bold] This plan was generated using a different version of Terraform, the diff presented here maybe missing representations of recent features."),
+			renderer.Colorize.Color("\n[bold][red]Warning:[reset][bold] This plan was generated using a different version of Terraform, the diff presented here may be missing representations of recent features."),
 			renderer.Streams.Stdout.Columns()))
 	}
 
@@ -100,7 +102,7 @@ func (r Renderer) RenderLog(log *JSONLog) error {
 		// We won't display these types of logs
 		return nil
 
-	case LogApplyStart, LogApplyComplete, LogRefreshStart, LogProvisionStart:
+	case LogApplyStart, LogApplyComplete, LogRefreshStart, LogProvisionStart, LogResourceDrift:
 		msg := fmt.Sprintf(r.Colorize.Color("[bold]%s[reset]"), log.Message)
 		r.Streams.Println(msg)
 
@@ -112,7 +114,7 @@ func (r Renderer) RenderLog(log *JSONLog) error {
 		if len(log.Outputs) > 0 {
 			r.Streams.Println(r.Colorize.Color("[bold][green]Outputs:[reset]"))
 			for name, output := range log.Outputs {
-				change := differ.FromJsonViewsOutput(output)
+				change := structured.FromJsonViewsOutput(output)
 				ctype, err := ctyjson.UnmarshalType(output.Type)
 				if err != nil {
 					return err
@@ -121,7 +123,7 @@ func (r Renderer) RenderLog(log *JSONLog) error {
 				opts := computed.NewRenderHumanOpts(r.Colorize)
 				opts.ShowUnchangedChildren = true
 
-				outputDiff := change.ComputeDiffForType(ctype)
+				outputDiff := differ.ComputeDiffForType(change, ctype)
 				outputStr := outputDiff.RenderHuman(0, opts)
 
 				msg := fmt.Sprintf("%s = %s", name, outputStr)

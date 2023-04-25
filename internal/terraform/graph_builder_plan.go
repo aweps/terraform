@@ -127,6 +127,13 @@ func (b *PlanGraphBuilder) Steps() []GraphTransformer {
 			Planning: true,
 		},
 
+		// Add nodes and edges for the check block assertions. Check block data
+		// sources were added earlier.
+		&checkTransformer{
+			Config:    b.Config,
+			Operation: b.Operation,
+		},
+
 		// Add orphan resources
 		&OrphanResourceInstanceTransformer{
 			Concrete: b.ConcreteResourceOrphan,
@@ -184,7 +191,9 @@ func (b *PlanGraphBuilder) Steps() []GraphTransformer {
 
 		// DestroyEdgeTransformer is only required during a plan so that the
 		// TargetsTransformer can determine which nodes to keep in the graph.
-		&DestroyEdgeTransformer{},
+		&DestroyEdgeTransformer{
+			Operation: b.Operation,
+		},
 
 		&pruneUnusedNodesTransformer{
 			skip: b.Operation != walkPlanDestroy,

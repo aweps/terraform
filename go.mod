@@ -39,12 +39,12 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/hashicorp/go-plugin v1.4.3
 	github.com/hashicorp/go-retryablehttp v0.7.2
-	github.com/hashicorp/go-tfe v1.18.0
+	github.com/hashicorp/go-tfe v1.21.0
 	github.com/hashicorp/go-uuid v1.0.3
 	github.com/hashicorp/go-version v1.6.0
 	github.com/hashicorp/hcl v0.0.0-20170504190234-a4b07c25de5f
-	github.com/hashicorp/hcl/v2 v2.16.2
-	github.com/hashicorp/jsonapi v0.0.0-20210826224640-ee7dae0fb22d
+	github.com/hashicorp/hcl/v2 v2.16.0
+	github.com/hashicorp/terraform-config-inspect v0.0.0-20210209133302-4fd17a0faac2
 	github.com/hashicorp/terraform-registry-address v0.0.0-20220623143253-7d51757b572c
 	github.com/hashicorp/terraform-svchost v0.1.0
 	github.com/jmespath/go-jmespath v0.4.0
@@ -147,7 +147,7 @@ require (
 	github.com/hashicorp/go-msgpack v0.5.4 // indirect
 	github.com/hashicorp/go-rootcerts v1.0.2 // indirect
 	github.com/hashicorp/go-safetemp v1.0.0 // indirect
-	github.com/hashicorp/go-slug v0.10.1 // indirect
+	github.com/hashicorp/go-slug v0.11.0 // indirect
 	github.com/hashicorp/golang-lru v0.5.1 // indirect
 	github.com/hashicorp/serf v0.9.5 // indirect
 	github.com/hashicorp/yamux v0.0.0-20181012175058-2f1d1f20f75d // indirect

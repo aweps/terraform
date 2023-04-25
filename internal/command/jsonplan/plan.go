@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/zclconf/go-cty/cty"
 	ctyjson "github.com/zclconf/go-cty/cty/json"
@@ -39,6 +40,7 @@ const (
 	ResourceInstanceDeleteBecauseNoMoveTarget     = "delete_because_no_move_target"
 	ResourceInstanceReadBecauseConfigUnknown      = "read_because_config_unknown"
 	ResourceInstanceReadBecauseDependencyPending  = "read_because_dependency_pending"
+	ResourceInstanceReadBecauseCheckNested        = "read_because_check_nested"
 )
 
 // Plan is the top-level representation of the json format of a plan. It includes
@@ -57,6 +59,7 @@ type plan struct {
 	Config             json.RawMessage   `json:"configuration,omitempty"`
 	RelevantAttributes []ResourceAttr    `json:"relevant_attributes,omitempty"`
 	Checks             json.RawMessage   `json:"checks,omitempty"`
+	Timestamp          string            `json:"timestamp,omitempty"`
 }
 
 func newPlan() *plan {
@@ -192,6 +195,7 @@ func Marshal(
 ) ([]byte, error) {
 	output := newPlan()
 	output.TerraformVersion = version.String()
+	output.Timestamp = p.Timestamp.Format(time.RFC3339)
 
 	err := output.marshalPlanVariables(p.VariableValues, config.Module.Variables)
 	if err != nil {
@@ -492,6 +496,8 @@ func MarshalResourceChanges(resources []*plans.ResourceInstanceChangeSrc, schema
 			r.ActionReason = ResourceInstanceReadBecauseConfigUnknown
 		case plans.ResourceInstanceReadBecauseDependencyPending:
 			r.ActionReason = ResourceInstanceReadBecauseDependencyPending
+		case plans.ResourceInstanceReadBecauseCheckNested:
+			r.ActionReason = ResourceInstanceReadBecauseCheckNested
 		default:
 			return nil, fmt.Errorf("resource %s has an unsupported action reason %s", r.Address, rc.ActionReason)
 		}

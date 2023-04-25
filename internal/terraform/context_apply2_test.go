@@ -1887,3 +1887,158 @@ output "null_module_test" {
 	_, diags = ctx.Apply(plan, m)
 	assertNoErrors(t, diags)
 }
+
+func TestContext2Apply_moduleOutputWithSensitiveAttrs(t *testing.T) {
+	// Ensure that nested sensitive marks are stored when accessing non-root
+	// module outputs, and that they do not cause the entire output value to
+	// become sensitive.
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+module "mod" {
+  source = "./mod"
+}
+
+resource "test_resource" "b" {
+  // if the module output were wholly sensitive it would not be valid to use in
+  // for_each
+  for_each = module.mod.resources
+  value = each.value.output
+}
+
+output "root_output" {
+  // The root output cannot contain any sensitive marks at all.
+  // Applying nonsensitive would fail here if the nested sensitive mark were
+  // not maintained through the output.
+  value = [ for k, v in module.mod.resources : nonsensitive(v.output) ]
+}
+`,
+		"./mod/main.tf": `
+resource "test_resource" "a" {
+  for_each = {"key": "value"}
+  value = each.key
+}
+
+output "resources" {
+  value = test_resource.a
+}
+`,
+	})
+
+	p := testProvider("test")
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_resource": {
+				Attributes: map[string]*configschema.Attribute{
+					"value": {
+						Type:     cty.String,
+						Required: true,
+					},
+					"output": {
+						Type:      cty.String,
+						Sensitive: true,
+						Computed:  true,
+					},
+				},
+			},
+		},
+	})
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+	})
+	plan, diags := ctx.Plan(m, states.NewState(), &PlanOpts{
+		Mode: plans.NormalMode,
+	})
+	assertNoErrors(t, diags)
+	_, diags = ctx.Apply(plan, m)
+	assertNoErrors(t, diags)
+}
+
+func TestContext2Apply_timestamps(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_resource" "a" {
+  id = "timestamp"
+  value = timestamp()
+}
+
+resource "test_resource" "b" {
+  id = "plantimestamp"
+  value = plantimestamp()
+}
+`,
+	})
+
+	var plantime time.Time
+
+	p := testProvider("test")
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_resource": {
+				Attributes: map[string]*configschema.Attribute{
+					"id": {
+						Type:     cty.String,
+						Required: true,
+					},
+					"value": {
+						Type:     cty.String,
+						Required: true,
+					},
+				},
+			},
+		},
+	})
+	p.PlanResourceChangeFn = func(request providers.PlanResourceChangeRequest) providers.PlanResourceChangeResponse {
+		values := request.ProposedNewState.AsValueMap()
+		if id := values["id"]; id.AsString() == "plantimestamp" {
+			var err error
+			plantime, err = time.Parse(time.RFC3339, values["value"].AsString())
+			if err != nil {
+				t.Errorf("couldn't parse plan time: %s", err)
+			}
+		}
+
+		return providers.PlanResourceChangeResponse{
+			PlannedState: request.ProposedNewState,
+		}
+	}
+	p.ApplyResourceChangeFn = func(request providers.ApplyResourceChangeRequest) providers.ApplyResourceChangeResponse {
+		values := request.PlannedState.AsValueMap()
+		if id := values["id"]; id.AsString() == "timestamp" {
+			applytime, err := time.Parse(time.RFC3339, values["value"].AsString())
+			if err != nil {
+				t.Errorf("couldn't parse apply time: %s", err)
+			}
+
+			if applytime.Before(plantime) {
+				t.Errorf("applytime (%s) should be after plantime (%s)", applytime.Format(time.RFC3339), plantime.Format(time.RFC3339))
+			}
+		} else if id.AsString() == "plantimestamp" {
+			otherplantime, err := time.Parse(time.RFC3339, values["value"].AsString())
+			if err != nil {
+				t.Errorf("couldn't parse plan time: %s", err)
+			}
+
+			if !plantime.Equal(otherplantime) {
+				t.Errorf("plantime changed from (%s) to (%s) during apply", plantime.Format(time.RFC3339), otherplantime.Format(time.RFC3339))
+			}
+		}
+
+		return providers.ApplyResourceChangeResponse{
+			NewState: request.PlannedState,
+		}
+	}
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+	})
+	plan, diags := ctx.Plan(m, states.NewState(), &PlanOpts{
+		Mode: plans.NormalMode,
+	})
+	assertNoErrors(t, diags)
+
+	_, diags = ctx.Apply(plan, m)
+	assertNoErrors(t, diags)
+}
