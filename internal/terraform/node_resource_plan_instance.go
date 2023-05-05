@@ -6,16 +6,22 @@ package terraform
 import (
 	"fmt"
 	"log"
+	"path/filepath"
 	"sort"
 
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/zclconf/go-cty/cty"
+
 	"github.com/hashicorp/terraform/internal/addrs"
+	"github.com/hashicorp/terraform/internal/configs"
+	"github.com/hashicorp/terraform/internal/configs/configschema"
+	"github.com/hashicorp/terraform/internal/genconfig"
 	"github.com/hashicorp/terraform/internal/instances"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/tfdiags"
-
-	"github.com/zclconf/go-cty/cty"
 )
 
 // NodePlannableResourceInstance represents a _single_ resource
@@ -133,7 +139,6 @@ func (n *NodePlannableResourceInstance) managedResourceExecute(ctx EvalContext) 
 	config := n.Config
 	addr := n.ResourceInstanceAddr()
 
-	var change *plans.ResourceInstanceChange
 	var instanceRefreshState *states.ResourceInstanceObject
 
 	checkRuleSeverity := tfdiags.Error
@@ -147,17 +152,42 @@ func (n *NodePlannableResourceInstance) managedResourceExecute(ctx EvalContext) 
 		return diags
 	}
 
-	diags = diags.Append(validateSelfRef(addr.Resource, config.Config, providerSchema))
-	if diags.HasErrors() {
-		return diags
+	if config != nil {
+		diags = diags.Append(validateSelfRef(addr.Resource, config.Config, providerSchema))
+		if diags.HasErrors() {
+			return diags
+		}
 	}
 
 	importing := n.importTarget.ID != ""
 
+	if importing && n.Config == nil && len(n.generateConfigPath) == 0 {
+		// Then the user wrote an import target to a target that didn't exist.
+		if n.Addr.Module.IsRoot() {
+			diags = diags.Append(&hcl.Diagnostic{
+				Severity: hcl.DiagError,
+				Summary:  "Import block target does not exist",
+				Detail:   "The target for the given import block does not exist. If you wish to automatically generate config for this resource, use the -generate-config-out option within terraform plan. Otherwise, make sure the target resource exists within your configuration. For example:\n\n  terraform plan -generate-config-out=generated.tf",
+				Subject:  n.importTarget.Config.DeclRange.Ptr(),
+			})
+		} else {
+			// You can't generate config for a resource that is inside a
+			// module, so we will present a different error message for
+			// this case.
+			diags = diags.Append(&hcl.Diagnostic{
+				Severity: hcl.DiagError,
+				Summary:  "Import block target does not exist",
+				Detail:   "The target for the given import block does not exist. The specified target is within a module, and must be defined as a resource within that module before anything can be imported.",
+				Subject:  n.importTarget.Config.DeclRange.Ptr(),
+			})
+		}
+		return diags
+	}
+
 	// If the resource is to be imported, we now ask the provider for an Import
 	// and a Refresh, and save the resulting state to instanceRefreshState.
 	if importing {
-		instanceRefreshState, diags = n.importState(ctx, addr, provider)
+		instanceRefreshState, diags = n.importState(ctx, addr, provider, providerSchema)
 	} else {
 		var readDiags tfdiags.Diagnostics
 		instanceRefreshState, readDiags = n.readResourceInstanceState(ctx, addr)
@@ -239,14 +269,34 @@ func (n *NodePlannableResourceInstance) managedResourceExecute(ctx EvalContext) 
 		}
 
 		change, instancePlanState, repeatData, planDiags := n.plan(
-			ctx, change, instanceRefreshState, n.ForceCreateBeforeDestroy, n.forceReplace,
+			ctx, nil, instanceRefreshState, n.ForceCreateBeforeDestroy, n.forceReplace,
 		)
 		diags = diags.Append(planDiags)
 		if diags.HasErrors() {
+			// If we are importing and generating a configuration, we need to
+			// ensure the change is written out so the configuration can be
+			// captured.
+			if len(n.generateConfigPath) > 0 {
+				// Update our return plan
+				change := &plans.ResourceInstanceChange{
+					Addr:         n.Addr,
+					PrevRunAddr:  n.prevRunAddr(ctx),
+					ProviderAddr: n.ResolvedProvider,
+					Change: plans.Change{
+						// we only need a placeholder, so this will be a NoOp
+						Action:          plans.NoOp,
+						Before:          instanceRefreshState.Value,
+						After:           instanceRefreshState.Value,
+						GeneratedConfig: n.generatedConfigHCL,
+					},
+				}
+				diags = diags.Append(n.writeChange(ctx, change, ""))
+			}
+
 			return diags
 		}
 
-		if n.importTarget.ID != "" {
+		if importing {
 			change.Importing = &plans.Importing{ID: n.importTarget.ID}
 		}
 
@@ -361,6 +411,9 @@ func (n *NodePlannableResourceInstance) managedResourceExecute(ctx EvalContext) 
 // instance address is added to forceReplace
 func (n *NodePlannableResourceInstance) replaceTriggered(ctx EvalContext, repData instances.RepetitionData) tfdiags.Diagnostics {
 	var diags tfdiags.Diagnostics
+	if n.Config == nil {
+		return diags
+	}
 
 	for _, expr := range n.Config.TriggersReplacement {
 		ref, replace, evalDiags := ctx.EvaluateReplaceTriggeredBy(expr, repData)
@@ -386,12 +439,12 @@ func (n *NodePlannableResourceInstance) replaceTriggered(ctx EvalContext, repDat
 	return diags
 }
 
-func (n *NodePlannableResourceInstance) importState(ctx EvalContext, addr addrs.AbsResourceInstance, provider providers.Interface) (*states.ResourceInstanceObject, tfdiags.Diagnostics) {
+func (n *NodePlannableResourceInstance) importState(ctx EvalContext, addr addrs.AbsResourceInstance, provider providers.Interface, providerSchema *ProviderSchema) (*states.ResourceInstanceObject, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 	absAddr := addr.Resource.Absolute(ctx.Path())
 
 	diags = diags.Append(ctx.Hook(func(h Hook) (HookAction, error) {
-		return h.PreImportState(absAddr, n.importTarget.ID)
+		return h.PrePlanImport(absAddr, n.importTarget.ID)
 	}))
 	if diags.HasErrors() {
 		return nil, diags
@@ -437,7 +490,7 @@ func (n *NodePlannableResourceInstance) importState(ctx EvalContext, addr addrs.
 
 	// call post-import hook
 	diags = diags.Append(ctx.Hook(func(h Hook) (HookAction, error) {
-		return h.PostImportState(absAddr, imported)
+		return h.PostPlanImport(absAddr, imported)
 	}))
 
 	if imported[0].TypeName == "" {
@@ -490,8 +543,88 @@ func (n *NodePlannableResourceInstance) importState(ctx EvalContext, addr addrs.
 		return instanceRefreshState, diags
 	}
 
+	// If we're importing and generating config, generate it now.
+	if len(n.generateConfigPath) > 0 {
+		if n.Config != nil {
+			return instanceRefreshState, diags.Append(fmt.Errorf("tried to generate config for %s, but it already exists", n.Addr))
+		}
+
+		schema, _ := providerSchema.SchemaForResourceAddr(n.Addr.Resource.Resource)
+		if schema == nil {
+			// Should be caught during validation, so we don't bother with a pretty error here
+			diags = diags.Append(fmt.Errorf("provider does not support resource type for %q", n.Addr))
+			return instanceRefreshState, diags
+		}
+
+		// Generate the HCL string first, then parse the HCL body from it.
+		// First we generate the contents of the resource block for use within
+		// the planning node. Then we wrap it in an enclosing resource block to
+		// pass into the plan for rendering.
+		generatedHCLAttributes, generatedDiags := n.generateHCLStringAttributes(n.Addr, instanceRefreshState, schema)
+		diags = diags.Append(generatedDiags)
+
+		n.generatedConfigHCL = genconfig.WrapResourceContents(n.Addr, generatedHCLAttributes)
+
+		// parse the "file" as HCL to get the hcl.Body
+		synthHCLFile, hclDiags := hclsyntax.ParseConfig([]byte(generatedHCLAttributes), filepath.Base(n.generateConfigPath), hcl.Pos{Byte: 0, Line: 1, Column: 1})
+		diags = diags.Append(hclDiags)
+		if hclDiags.HasErrors() {
+			return instanceRefreshState, diags
+		}
+
+		// We have to do a kind of mini parsing of the content here to correctly
+		// mark attributes like 'provider' as hidden. We only care about the
+		// resulting content, so it's remain that gets passed into the resource
+		// as the config.
+		_, remain, resourceDiags := synthHCLFile.Body.PartialContent(configs.ResourceBlockSchema)
+		diags = diags.Append(resourceDiags)
+		if resourceDiags.HasErrors() {
+			return instanceRefreshState, diags
+		}
+
+		n.Config = &configs.Resource{
+			Mode:     addrs.ManagedResourceMode,
+			Type:     n.Addr.Resource.Resource.Type,
+			Name:     n.Addr.Resource.Resource.Name,
+			Config:   remain,
+			Managed:  &configs.ManagedResource{},
+			Provider: n.ResolvedProvider.Provider,
+		}
+	}
+
 	diags = diags.Append(riNode.writeResourceInstanceState(ctx, instanceRefreshState, refreshState))
 	return instanceRefreshState, diags
+}
+
+// generateHCLStringAttributes produces a string in HCL format for the given
+// resource state and schema without the surrounding block.
+func (n *NodePlannableResourceInstance) generateHCLStringAttributes(addr addrs.AbsResourceInstance, state *states.ResourceInstanceObject, schema *configschema.Block) (string, tfdiags.Diagnostics) {
+	filteredSchema := schema.Filter(
+		configschema.FilterOr(
+			configschema.FilterReadOnlyAttribute,
+			configschema.FilterDeprecatedAttribute,
+
+			// The legacy SDK adds an Optional+Computed "id" attribute to the
+			// resource schema even if not defined in provider code.
+			// During validation, however, the presence of an extraneous "id"
+			// attribute in config will cause an error.
+			// Remove this attribute so we do not generate an "id" attribute
+			// where there is a risk that it is not in the real resource schema.
+			//
+			// TRADEOFF: Resources in which there actually is an
+			// Optional+Computed "id" attribute in the schema will have that
+			// attribute missing from generated config.
+			configschema.FilterHelperSchemaIdAttribute,
+		),
+		configschema.FilterDeprecatedBlock,
+	)
+
+	providerAddr := addrs.LocalProviderConfig{
+		LocalName: n.ResolvedProvider.Provider.Type,
+		Alias:     n.ResolvedProvider.Alias,
+	}
+
+	return genconfig.GenerateResourceContents(addr, filteredSchema, providerAddr, state.Value)
 }
 
 // mergeDeps returns the union of 2 sets of dependencies

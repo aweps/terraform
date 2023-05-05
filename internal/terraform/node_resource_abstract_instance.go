@@ -39,6 +39,10 @@ type NodeAbstractResourceInstance struct {
 	Dependencies []addrs.ConfigResource
 
 	preDestroyRefresh bool
+
+	// During import we may generate configuration for a resource, which needs
+	// to be stored in the final change.
+	generatedConfigHCL string
 }
 
 // NewNodeAbstractResourceInstance creates an abstract resource instance graph
@@ -648,18 +652,43 @@ func (n *NodeAbstractResourceInstance) plan(
 	plannedChange *plans.ResourceInstanceChange,
 	currentState *states.ResourceInstanceObject,
 	createBeforeDestroy bool,
-	forceReplace []addrs.AbsResourceInstance) (*plans.ResourceInstanceChange, *states.ResourceInstanceObject, instances.RepetitionData, tfdiags.Diagnostics) {
+	forceReplace []addrs.AbsResourceInstance,
+) (*plans.ResourceInstanceChange, *states.ResourceInstanceObject, instances.RepetitionData, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
-	var state *states.ResourceInstanceObject
-	var plan *plans.ResourceInstanceChange
 	var keyData instances.RepetitionData
 
-	config := *n.Config
 	resource := n.Addr.Resource.Resource
 	provider, providerSchema, err := getProvider(ctx, n.ResolvedProvider)
 	if err != nil {
-		return plan, state, keyData, diags.Append(err)
+		return nil, nil, keyData, diags.Append(err)
 	}
+
+	if providerSchema == nil {
+		diags = diags.Append(fmt.Errorf("provider schema is unavailable for %s", n.Addr))
+		return nil, nil, keyData, diags
+	}
+	schema, _ := providerSchema.SchemaForResourceAddr(resource)
+	if schema == nil {
+		// Should be caught during validation, so we don't bother with a pretty error here
+		diags = diags.Append(fmt.Errorf("provider does not support resource type %q", resource.Type))
+		return nil, nil, keyData, diags
+	}
+
+	// If we're importing and generating config, generate it now.
+	if n.Config == nil {
+		// This shouldn't happen. A node that isn't generating config should
+		// have embedded config, and the rest of Terraform should enforce this.
+		// If, however, we didn't do things correctly the next line will panic,
+		// so let's not do that and return an error message with more context.
+
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Resource has no configuration",
+			fmt.Sprintf("Terraform attempted to process a resource at %s that has no configuration. This is a bug in Terraform; please report it!", n.Addr.String())))
+		return nil, nil, keyData, diags
+	}
+
+	config := *n.Config
 
 	checkRuleSeverity := tfdiags.Error
 	if n.preDestroyRefresh {
@@ -671,19 +700,7 @@ func (n *NodeAbstractResourceInstance) plan(
 		createBeforeDestroy = plannedChange.Action == plans.CreateThenDelete
 	}
 
-	if providerSchema == nil {
-		diags = diags.Append(fmt.Errorf("provider schema is unavailable for %s", n.Addr))
-		return plan, state, keyData, diags
-	}
-
 	// Evaluate the configuration
-	schema, _ := providerSchema.SchemaForResourceAddr(resource)
-	if schema == nil {
-		// Should be caught during validation, so we don't bother with a pretty error here
-		diags = diags.Append(fmt.Errorf("provider does not support resource type %q", resource.Type))
-		return plan, state, keyData, diags
-	}
-
 	forEach, _ := evaluateForEachExpression(n.Config.ForEach, ctx)
 
 	keyData = EvalDataForInstanceKey(n.ResourceInstanceAddr().Resource.Key, forEach)
@@ -696,7 +713,7 @@ func (n *NodeAbstractResourceInstance) plan(
 	)
 	diags = diags.Append(checkDiags)
 	if diags.HasErrors() {
-		return plan, state, keyData, diags // failed preconditions prevent further evaluation
+		return nil, nil, keyData, diags // failed preconditions prevent further evaluation
 	}
 
 	// If we have a previous plan and the action was a noop, then the only
@@ -709,13 +726,13 @@ func (n *NodeAbstractResourceInstance) plan(
 	origConfigVal, _, configDiags := ctx.EvaluateBlock(config.Config, schema, nil, keyData)
 	diags = diags.Append(configDiags)
 	if configDiags.HasErrors() {
-		return plan, state, keyData, diags
+		return nil, nil, keyData, diags
 	}
 
 	metaConfigVal, metaDiags := n.providerMetas(ctx)
 	diags = diags.Append(metaDiags)
 	if diags.HasErrors() {
-		return plan, state, keyData, diags
+		return nil, nil, keyData, diags
 	}
 
 	var priorVal cty.Value
@@ -758,7 +775,7 @@ func (n *NodeAbstractResourceInstance) plan(
 	)
 	diags = diags.Append(validateResp.Diagnostics.InConfigBody(config.Config, n.Addr.String()))
 	if diags.HasErrors() {
-		return plan, state, keyData, diags
+		return nil, nil, keyData, diags
 	}
 
 	// ignore_changes is meant to only apply to the configuration, so it must
@@ -771,7 +788,7 @@ func (n *NodeAbstractResourceInstance) plan(
 	configValIgnored, ignoreChangeDiags := n.processIgnoreChanges(priorVal, origConfigVal, schema)
 	diags = diags.Append(ignoreChangeDiags)
 	if ignoreChangeDiags.HasErrors() {
-		return plan, state, keyData, diags
+		return nil, nil, keyData, diags
 	}
 
 	// Create an unmarked version of our config val and our prior val.
@@ -787,7 +804,7 @@ func (n *NodeAbstractResourceInstance) plan(
 		return h.PreDiff(n.Addr, states.CurrentGen, priorVal, proposedNewVal)
 	}))
 	if diags.HasErrors() {
-		return plan, state, keyData, diags
+		return nil, nil, keyData, diags
 	}
 
 	resp := provider.PlanResourceChange(providers.PlanResourceChangeRequest{
@@ -800,7 +817,7 @@ func (n *NodeAbstractResourceInstance) plan(
 	})
 	diags = diags.Append(resp.Diagnostics.InConfigBody(config.Config, n.Addr.String()))
 	if diags.HasErrors() {
-		return plan, state, keyData, diags
+		return nil, nil, keyData, diags
 	}
 
 	plannedNewVal := resp.PlannedState
@@ -828,7 +845,7 @@ func (n *NodeAbstractResourceInstance) plan(
 		))
 	}
 	if diags.HasErrors() {
-		return plan, state, keyData, diags
+		return nil, nil, keyData, diags
 	}
 
 	if errs := objchange.AssertPlanValid(schema, unmarkedPriorVal, unmarkedConfigVal, plannedNewVal); len(errs) > 0 {
@@ -858,7 +875,7 @@ func (n *NodeAbstractResourceInstance) plan(
 					),
 				))
 			}
-			return plan, state, keyData, diags
+			return nil, nil, keyData, diags
 		}
 	}
 
@@ -878,7 +895,7 @@ func (n *NodeAbstractResourceInstance) plan(
 		plannedNewVal, ignoreChangeDiags = n.processIgnoreChanges(unmarkedPriorVal, plannedNewVal, nil)
 		diags = diags.Append(ignoreChangeDiags)
 		if ignoreChangeDiags.HasErrors() {
-			return plan, state, keyData, diags
+			return nil, nil, keyData, diags
 		}
 	}
 
@@ -945,7 +962,7 @@ func (n *NodeAbstractResourceInstance) plan(
 			}
 		}
 		if diags.HasErrors() {
-			return plan, state, keyData, diags
+			return nil, nil, keyData, diags
 		}
 	}
 
@@ -1039,7 +1056,7 @@ func (n *NodeAbstractResourceInstance) plan(
 		// append these new diagnostics if there's at least one error inside.
 		if resp.Diagnostics.HasErrors() {
 			diags = diags.Append(resp.Diagnostics.InConfigBody(config.Config, n.Addr.String()))
-			return plan, state, keyData, diags
+			return nil, nil, keyData, diags
 		}
 		plannedNewVal = resp.PlannedState
 		plannedPrivate = resp.PlannedPrivate
@@ -1059,7 +1076,7 @@ func (n *NodeAbstractResourceInstance) plan(
 			))
 		}
 		if diags.HasErrors() {
-			return plan, state, keyData, diags
+			return nil, nil, keyData, diags
 		}
 	}
 
@@ -1109,11 +1126,11 @@ func (n *NodeAbstractResourceInstance) plan(
 		return h.PostDiff(n.Addr, states.CurrentGen, action, priorVal, plannedNewVal)
 	}))
 	if diags.HasErrors() {
-		return plan, state, keyData, diags
+		return nil, nil, keyData, diags
 	}
 
 	// Update our return plan
-	plan = &plans.ResourceInstanceChange{
+	plan := &plans.ResourceInstanceChange{
 		Addr:         n.Addr,
 		PrevRunAddr:  n.prevRunAddr(ctx),
 		Private:      plannedPrivate,
@@ -1124,14 +1141,15 @@ func (n *NodeAbstractResourceInstance) plan(
 			// Pass the marked planned value through in our change
 			// to propogate through evaluation.
 			// Marks will be removed when encoding.
-			After: plannedNewVal,
+			After:           plannedNewVal,
+			GeneratedConfig: n.generatedConfigHCL,
 		},
 		ActionReason:    actionReason,
 		RequiredReplace: reqRep,
 	}
 
 	// Update our return state
-	state = &states.ResourceInstanceObject{
+	state := &states.ResourceInstanceObject{
 		// We use the special "planned" status here to note that this
 		// object's value is not yet complete. Objects with this status
 		// cannot be used during expression evaluation, so the caller

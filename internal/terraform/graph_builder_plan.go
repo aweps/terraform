@@ -75,6 +75,12 @@ type PlanGraphBuilder struct {
 
 	// ImportTargets are the list of resources to import.
 	ImportTargets []*ImportTarget
+
+	// GenerateConfig tells Terraform where to write and generated config for
+	// any import targets that do not already have configuration.
+	//
+	// If empty, then config will not be generated.
+	GenerateConfigPath string
 }
 
 // See GraphBuilder
@@ -111,6 +117,9 @@ func (b *PlanGraphBuilder) Steps() []GraphTransformer {
 			skip: b.Operation == walkPlanDestroy,
 
 			importTargets: b.ImportTargets,
+
+			// We only want to generate config during a plan operation.
+			generateConfigPathForImportTargets: b.GenerateConfigPath,
 		},
 
 		// Add dynamic values
@@ -120,7 +129,7 @@ func (b *PlanGraphBuilder) Steps() []GraphTransformer {
 		&OutputTransformer{
 			Config:      b.Config,
 			RefreshOnly: b.skipPlanChanges || b.preDestroyRefresh,
-			PlanDestroy: b.Operation == walkPlanDestroy,
+			Destroying:  b.Operation == walkPlanDestroy,
 
 			// NOTE: We currently treat anything built with the plan graph
 			// builder as "planning" for our purposes here, because we share

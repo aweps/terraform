@@ -402,11 +402,69 @@ func (m *Module) appendFile(file *File) hcl.Diagnostics {
 		}
 	}
 
-	// "Moved" and "import" blocks just append, because they are all independent
-	// of one another at this level. (We handle any references between
-	// them at runtime.)
+	// "Moved" blocks just append, because they are all independent of one
+	// another at this level. (We handle any references between them at
+	// runtime.)
 	m.Moved = append(m.Moved, file.Moved...)
 	m.Import = append(m.Import, file.Import...)
+
+	for _, i := range file.Import {
+		for _, mi := range m.Import {
+			if i.To.Equal(mi.To) {
+				diags = append(diags, &hcl.Diagnostic{
+					Severity: hcl.DiagError,
+					Summary:  fmt.Sprintf("Duplicate import configuration for %q", i.To),
+					Detail:   fmt.Sprintf("An import block for the resource %q was already declared at %s. A resource can have only one import block.", i.To, mi.DeclRange),
+					Subject:  &i.DeclRange,
+				})
+				continue
+			}
+
+			if i.ID == mi.ID {
+				if i.To.Resource.Resource.Type == mi.To.Resource.Resource.Type {
+					diags = append(diags, &hcl.Diagnostic{
+						Severity: hcl.DiagError,
+						Summary:  fmt.Sprintf("Duplicate import for ID %q", i.ID),
+						Detail:   fmt.Sprintf("An import block for the ID %q and a resource of type %q was already declared at %s. The same resource cannot be imported twice.", i.ID, i.To.Resource.Resource.Type, mi.DeclRange),
+						Subject:  &i.DeclRange,
+					})
+					continue
+				}
+			}
+		}
+
+		if i.ProviderConfigRef != nil {
+			i.Provider = m.ProviderForLocalConfig(addrs.LocalProviderConfig{
+				LocalName: i.ProviderConfigRef.Name,
+				Alias:     i.ProviderConfigRef.Alias,
+			})
+		} else {
+			implied, err := addrs.ParseProviderPart(i.To.Resource.Resource.ImpliedProvider())
+			if err == nil {
+				i.Provider = m.ImpliedProviderForUnqualifiedType(implied)
+			}
+			// We don't return a diagnostic because the invalid resource name
+			// will already have been caught.
+		}
+
+		// It is invalid for any import block to have a "to" argument matching
+		// any moved block's "from" argument.
+		for _, mb := range m.Moved {
+			// Comparing string serialisations is good enough here, because we
+			// only care about equality in the case that both addresses are
+			// AbsResourceInstances.
+			if mb.From.String() == i.To.String() {
+				diags = append(diags, &hcl.Diagnostic{
+					Severity: hcl.DiagError,
+					Summary:  "Cannot import to a move source",
+					Detail:   fmt.Sprintf("An import block for ID %q targets resource address %s, but this address appears in the \"from\" argument of a moved block, which is invalid. Please change the import target to a different address, such as the move target.", i.ID, i.To),
+					Subject:  &i.DeclRange,
+				})
+			}
+		}
+
+		m.Import = append(m.Import, i)
+	}
 
 	return diags
 }
