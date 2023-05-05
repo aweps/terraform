@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package terraform
 
@@ -2044,4 +2044,203 @@ resource "test_resource" "b" {
 
 	_, diags = ctx.Apply(plan, m)
 	assertNoErrors(t, diags)
+}
+
+func TestContext2Apply_destroyUnusedModuleProvider(t *testing.T) {
+	// an unsued provider within a module should not be called during destroy
+	unusedProvider := testProvider("unused")
+	testProvider := testProvider("test")
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"):   testProviderFuncFixed(testProvider),
+			addrs.NewDefaultProvider("unused"): testProviderFuncFixed(unusedProvider),
+		},
+	})
+
+	unusedProvider.ConfigureProviderFn = func(req providers.ConfigureProviderRequest) (resp providers.ConfigureProviderResponse) {
+		resp.Diagnostics = resp.Diagnostics.Append(errors.New("configuration failed"))
+		return resp
+	}
+
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+module "mod" {
+  source = "./mod"
+}
+
+resource "test_resource" "test" {
+}
+`,
+
+		"mod/main.tf": `
+provider "unused" {
+}
+
+resource "unused_resource" "test" {
+}
+`,
+	})
+
+	plan, diags := ctx.Plan(m, states.NewState(), &PlanOpts{
+		Mode: plans.DestroyMode,
+	})
+	assertNoErrors(t, diags)
+	_, diags = ctx.Apply(plan, m)
+	assertNoErrors(t, diags)
+}
+
+func TestContext2Apply_import(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_resource" "a" {
+  id = "importable"
+}
+
+import {
+  to = test_resource.a
+  id = "importable" 
+}
+`,
+	})
+
+	p := testProvider("test")
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_resource": {
+				Attributes: map[string]*configschema.Attribute{
+					"id": {
+						Type:     cty.String,
+						Required: true,
+					},
+				},
+			},
+		},
+	})
+	p.PlanResourceChangeFn = func(req providers.PlanResourceChangeRequest) providers.PlanResourceChangeResponse {
+		return providers.PlanResourceChangeResponse{
+			PlannedState: req.ProposedNewState,
+		}
+	}
+	p.ImportResourceStateFn = func(req providers.ImportResourceStateRequest) providers.ImportResourceStateResponse {
+		return providers.ImportResourceStateResponse{
+			ImportedResources: []providers.ImportedResource{
+				{
+					TypeName: "test_instance",
+					State: cty.ObjectVal(map[string]cty.Value{
+						"id": cty.StringVal("importable"),
+					}),
+				},
+			},
+		}
+	}
+	hook := new(MockHook)
+	ctx := testContext2(t, &ContextOpts{
+		Hooks: []Hook{hook},
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+	})
+	plan, diags := ctx.Plan(m, states.NewState(), &PlanOpts{
+		Mode: plans.NormalMode,
+	})
+	assertNoErrors(t, diags)
+
+	_, diags = ctx.Apply(plan, m)
+	assertNoErrors(t, diags)
+
+	if !hook.PreApplyImportCalled {
+		t.Fatalf("PreApplyImport hook not called")
+	}
+	if addr, wantAddr := hook.PreApplyImportAddr, mustResourceInstanceAddr("test_resource.a"); !addr.Equal(wantAddr) {
+		t.Errorf("expected addr to be %s, but was %s", wantAddr, addr)
+	}
+
+	if !hook.PostApplyImportCalled {
+		t.Fatalf("PostApplyImport hook not called")
+	}
+	if addr, wantAddr := hook.PostApplyImportAddr, mustResourceInstanceAddr("test_resource.a"); !addr.Equal(wantAddr) {
+		t.Errorf("expected addr to be %s, but was %s", wantAddr, addr)
+	}
+}
+
+func TestContext2Apply_noExternalReferences(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_object" "a" {
+	test_string = "foo"
+}
+
+locals {
+  local_value = test_object.a.test_string
+}
+`,
+	})
+
+	p := simpleMockProvider()
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+	})
+
+	plan, diags := ctx.Plan(m, states.NewState(), nil)
+	if diags.HasErrors() {
+		t.Errorf("expected no errors, but got %s", diags)
+	}
+
+	state, diags := ctx.Apply(plan, m)
+	if diags.HasErrors() {
+		t.Errorf("expected no errors, but got %s", diags)
+	}
+
+	// We didn't specify any external references, so the unreferenced local
+	// value should have been tidied up and never made it into the state.
+	module := state.RootModule()
+	if len(module.LocalValues) > 0 {
+		t.Errorf("expected no local values in the state but found %d", len(module.LocalValues))
+	}
+}
+
+func TestContext2Apply_withExternalReferences(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_object" "a" {
+	test_string = "foo"
+}
+
+locals {
+  local_value = test_object.a.test_string
+}
+`,
+	})
+
+	p := simpleMockProvider()
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+	})
+
+	plan, diags := ctx.Plan(m, states.NewState(), &PlanOpts{
+		Mode: plans.NormalMode,
+		ExternalReferences: []*addrs.Reference{
+			mustReference("local.local_value"),
+		},
+	})
+	if diags.HasErrors() {
+		t.Errorf("expected no errors, but got %s", diags)
+	}
+
+	state, diags := ctx.Apply(plan, m)
+	if diags.HasErrors() {
+		t.Errorf("expected no errors, but got %s", diags)
+	}
+
+	// We did specify the local value in the external references, so it should
+	// have been preserved even though it is not referenced by anything directly
+	// in the config.
+	module := state.RootModule()
+	if module.LocalValues["local_value"].AsString() != "foo" {
+		t.Errorf("expected local value to be \"foo\" but was \"%s\"", module.LocalValues["local_value"].AsString())
+	}
 }

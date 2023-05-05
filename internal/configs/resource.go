@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package configs
 
@@ -116,7 +116,7 @@ func decodeResourceBlock(block *hcl.Block, override bool) (*Resource, hcl.Diagno
 		Managed:   &ManagedResource{},
 	}
 
-	content, remain, moreDiags := block.Body.PartialContent(resourceBlockSchema)
+	content, remain, moreDiags := block.Body.PartialContent(ResourceBlockSchema)
 	diags = append(diags, moreDiags...)
 	r.Config = remain
 
@@ -568,7 +568,7 @@ func decodeReplaceTriggeredBy(expr hcl.Expression) ([]hcl.Expression, hcl.Diagno
 			exprs[i] = expr
 		}
 
-		refs, refDiags := lang.ReferencesInExpr(expr)
+		refs, refDiags := lang.ReferencesInExpr(addrs.ParseRef, expr)
 		for _, diag := range refDiags {
 			severity := hcl.DiagError
 			if diag.Severity() == tfdiags.Warning {
@@ -768,7 +768,12 @@ var commonResourceAttributes = []hcl.AttributeSchema{
 	},
 }
 
-var resourceBlockSchema = &hcl.BodySchema{
+// ResourceBlockSchema is the schema for a resource or data resource type within
+// Terraform.
+//
+// This schema is public as it is required elsewhere in order to validate and
+// use generated config.
+var ResourceBlockSchema = &hcl.BodySchema{
 	Attributes: commonResourceAttributes,
 	Blocks: []hcl.BlockHeaderSchema{
 		{Type: "locals"}, // reserved for future use

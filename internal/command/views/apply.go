@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package views
 
@@ -64,6 +64,14 @@ func (v *ApplyHuman) ResourceCount(stateOutPath string) {
 	if v.destroy {
 		v.view.streams.Printf(
 			v.view.colorize.Color("[reset][bold][green]\nDestroy complete! Resources: %d destroyed.\n"),
+			v.countHook.Removed,
+		)
+	} else if v.countHook.Imported > 0 {
+		v.view.streams.Printf(
+			v.view.colorize.Color("[reset][bold][green]\nApply complete! Resources: %d imported, %d added, %d changed, %d destroyed.\n"),
+			v.countHook.Imported,
+			v.countHook.Added,
+			v.countHook.Changed,
 			v.countHook.Removed,
 		)
 	} else {
@@ -133,6 +141,7 @@ func (v *ApplyJSON) ResourceCount(stateOutPath string) {
 		Add:       v.countHook.Added,
 		Change:    v.countHook.Changed,
 		Remove:    v.countHook.Removed,
+		Import:    v.countHook.Imported,
 		Operation: operation,
 	})
 }

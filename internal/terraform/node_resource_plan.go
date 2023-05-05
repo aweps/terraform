@@ -1,11 +1,10 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package terraform
 
 import (
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/hashicorp/terraform/internal/addrs"
@@ -200,12 +199,6 @@ func (n *nodeExpandPlannableResource) DynamicExpand(ctx EvalContext) (*Graph, er
 func (n *nodeExpandPlannableResource) expandResourceInstances(globalCtx EvalContext, resAddr addrs.AbsResource, g *Graph, instAddrs addrs.Set[addrs.Checkable]) error {
 	var diags tfdiags.Diagnostics
 
-	if n.Config == nil {
-		// Nothing to do, then.
-		log.Printf("[TRACE] nodeExpandPlannableResource: no configuration present for %s", n.Name())
-		return diags.ErrWithWarnings()
-	}
-
 	// The rest of our work here needs to know which module instance it's
 	// working in, so that it can evaluate expressions in the appropriate scope.
 	moduleCtx := globalCtx.WithPath(resAddr.Module)
@@ -325,9 +318,20 @@ func (n *nodeExpandPlannableResource) resourceInstanceSubgraph(ctx EvalContext, 
 		if n.legacyImportMode {
 			for _, importTarget := range n.importTargets {
 				if importTarget.Addr.Equal(a.Addr) {
+
+					// The import ID was supplied as a string on the command
+					// line and made into a synthetic HCL expression.
+					importId, diags := evaluateImportIdExpression(importTarget.ID, ctx)
+					if diags.HasErrors() {
+						// This should be impossible, because the import command
+						// arg parsing builds the synth expression from a
+						// non-null string.
+						panic(fmt.Sprintf("Invalid import id: %s. This is a bug in Terraform; please report it!", diags.Err()))
+					}
+
 					return &graphNodeImportState{
 						Addr:             importTarget.Addr,
-						ID:               importTarget.ID,
+						ID:               importId,
 						ResolvedProvider: n.ResolvedProvider,
 					}
 				}
@@ -343,6 +347,7 @@ func (n *nodeExpandPlannableResource) resourceInstanceSubgraph(ctx EvalContext, 
 		a.dependsOn = n.dependsOn
 		a.Dependencies = n.dependencies
 		a.preDestroyRefresh = n.preDestroyRefresh
+		a.generateConfigPath = n.generateConfigPath
 
 		m = &NodePlannableResourceInstance{
 			NodeAbstractResourceInstance: a,
@@ -361,8 +366,9 @@ func (n *nodeExpandPlannableResource) resourceInstanceSubgraph(ctx EvalContext, 
 				// If we get here, we're definitely not in legacy import mode,
 				// so go ahead and plan the resource changes including import.
 				m.importTarget = ImportTarget{
-					ID:   importTarget.ID,
-					Addr: importTarget.Addr,
+					ID:     importTarget.ID,
+					Addr:   importTarget.Addr,
+					Config: importTarget.Config,
 				}
 			}
 		}

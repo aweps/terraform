@@ -1,42 +1,43 @@
-## 1.5.0 (Unreleased)
-
-NEW FEATURES:
-
-* `check` blocks for validating infrastructure: Module and configuration authors can now write independent check blocks within their configuration to validate assertions about their infrastructure.
-
-    The new independent `check` blocks must specify at least one `assert` block, but possibly many, each one with a `condition` expression and an `error_message` expression matching the existing [Custom Condition Checks](https://developer.hashicorp.com/terraform/language/v1.4.x/expressions/custom-conditions). 
-    Additionally, check blocks can optionally load a scoped [data source](https://developer.hashicorp.com/terraform/language/v1.4.x/data-sources). Scoped data sources match the existing data sources with the exception that they can only be referenced from within their check block.
-
-    Unlike the existing `precondition` and `postcondition` blocks, Terraform will not halt execution should the scoped data block fail or error or if any of the assertions fail. 
-    This allows practitioners to continually validate the state of their infrastructure outside the usual lifecycle management cycle. 
-
-* Adds a new `plantimestamp` function that returns the timestamp at plan time. This is similar to the `timestamp` function which returns the timestamp at apply time.
-* Adds a new `strcontains` function that checks whether a given string contains a given substring. [GH-33069]
-
+## 1.6.0 (Unreleased)
 
 UPGRADE NOTES:
+* The S3 backend has a number of significant changes to its configuration format in this release, intended to match with recent changes in the `hashicorp/aws` provider:
+    * Configuration settings related to assuming IAM roles now belong to a nested block `assume_role`. The top-level arguments `role_arn`, `session_name`, `external_id`, `assume_role_duration_seconds`, `assume_role_policy_arns`, `assume_role_tags`, and `assume_role_transitive_tag_keys` are all now deprecated in favor of the nested equivalents. ([#30495](https://github.com/hashicorp/terraform/issues/30495))
+    * Configuration settings related to overriding the locations of AWS service endpoints used by the provider now belong to a nested block `endpoints`. The top-level arguments `dynamodb_endpoint`, `iam_endpoint`, `endpoint` (fir S3), and `sts_endpoint` are now deprecated in favor of the nested equivalents. ([#30492](https://github.com/hashicorp/terraform/issues/30492))
+    * The backend now uses the following environment variables for overriding the default locations of AWS service endpoints used by the provider: `AWS_ENDPOINT_URL_DYNAMODB`, `AWS_ENDPOINT_URL_IAM`, `AWS_ENDPOINT_URL_S3`, and `AWS_ENDPOINT_URL_STS`. The old non-standard names for these environment variables are now deprecated: `AWS_DYNAMODB_ENDPOINT`, `AWS_IAM_ENDPOINT`, `AWS_S3_ENDPOINT`, and `AWS_STS_ENDPOINT`. ([#30479](https://github.com/hashicorp/terraform/issues/30479))
+    * The singular `shared_credentials_file` argument is deprecated in favor of the plural `shared_credentials_files`.
 
-* This is the last version of Terraform for which macOS 10.13 High Sierra or 10.14 Mojave are officially supported. Future Terraform versions may not function correctly on these older versions of macOS.
-* This is the last version of Terraform for which Windows 7, 8, Server 2008, and Server 2012 are supported by Terraform's main implementation language, Go. We already ended explicit support for versions earlier than Windows 10 in Terraform v0.15.0, but future Terraform versions may malfunction in more significant ways on these older Windows versions.
-* On Linux (and some other non-macOS Unix platforms we don't officially support), Terraform will now notice the `trust-ad` option in `/etc/resolv.conf` and, if set, will set the "authentic data" option in outgoing DNS requests in order to better match the behavior of the GNU libc resolver.
+NEW FEATURES:
+* `terraform test`: The `terraform test` command is now generally available. This comes with a significant change to how tests are written and executed, based on feedback from the experimental phase.
 
-    Terraform does not pay any attention to the corresponding option in responses, but some DNSSEC-aware recursive resolvers return different responses when the request option isn't set. This should therefore avoid some potential situations where a DNS request from Terraform might get a different response than a similar request from other software on your system.
+    Terraform tests are written in `.tftest.hcl` files, containing a series of `run` blocks. Each `run` block executes a Terraform plan and optional apply against the Terraform configuration under test and can check conditions against the resulting plan and state.
 
 ENHANCEMENTS:
+* config: The `import` block `id` field now accepts expressions referring to other values such as resource attributes, as long as the value is a string known at plan time. ([#33618](https://github.com/hashicorp/terraform/issues/33618))
+* Terraform Cloud integration: Remote plans on Terraform Cloud/Enterprise can now be saved using the `-out` option, viewed using `terraform show`, and applied using `terraform apply` with the saved plan filename. ([#33492](https://github.com/hashicorp/terraform/issues/33492))
+* config: Terraform can now track some additional detail about values that won't be known until the apply step, such as the range of possible lengths for a collection or whether an unknown value can possibly be null.
 
-* Terraform CLI's local operations mode will now attempt to persist state snapshots to the state storage backend periodically during the apply step, thereby reducing the window for lost data if the Terraform process is aborted unexpectedly. [GH-32680]
-* If Terraform CLI receives SIGINT (or its equivalent on non-Unix platforms) during the apply step then it will immediately try to persist the latest state snapshot to the state storage backend, with the assumption that a graceful shutdown request often typically followed by a hard abort some time later if the graceful shutdown doesn't complete fast enough. [GH-32680]
-* `pg` backend: Now supports the `PG_CONN_STR`, `PG_SCHEMA_NAME`, `PG_SKIP_SCHEMA_CREATION`, `PG_SKIP_TABLE_CREATION` and `PG_SKIP_INDEX_CREATION` environment variables. [GH-33045]
+    When this information is available, Terraform can potentially generate known results for some operations on unknown values. This doesn't mean that Terraform can immediately track that detail in all cases, but the type system now supports that and so over time we can improve the level of detail generated by built-in functions, language operators, Terraform providers, etc. ([#33234](https://github.com/hashicorp/terraform/issues/33234))
+* config: The `try` and `can` functions can now return more precise and consistent results when faced with unknown arguments ([#33758](https://github.com/hashicorp/terraform/pull/33758))
+* `terraform show -json`: Now includes `errored` property, indicating whether the planning process halted with an error. An errored plan is not applyable. ([#33372](https://github.com/hashicorp/terraform/issues/33372))
+* core: Terraform will now skip requesting the (possibly very large) provider schema from providers which indicate during handshake that they don't require that for correct behavior, in situations where Terraform Core itself does not need the schema. ([#33486](https://github.com/hashicorp/terraform/pull/33486))
+* backend/kubernetes: The Kubernetes backend is no longer limited to storing states below 1MiB in size, and can now scale by splitting state across multiple secrets. ([#29678](https://github.com/hashicorp/terraform/pull/29678))
+* backend/s3: Various improvements for consistency with `hashicorp/aws` provider capabilities:
+    * `assume_role_with_web_identity` nested block for assuming a role with dynamic credentials such as a JSON Web Token. ([#31244](https://github.com/hashicorp/terraform/issues/31244))
+    * Now honors the standard AWS environment variables for credential and configuration files: `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE`. ([#30493](https://github.com/hashicorp/terraform/issues/30493))
+    * `shared_config_files` and `shared_credentials_files` arguments for specifying credential and configuration files as part of the backend configuration. ([#30493](https://github.com/hashicorp/terraform/issues/30493))
+    * Internally the backend now uses AWS SDK for Go v2, which should address various other missing behaviors that are handled by the SDK rather than by Terraform itself. ([#30443](https://github.com/hashicorp/terraform/issues/30443))
 
 BUG FIXES:
-
-* `terraform init`: Fixed crash with invalid blank module name. [GH-32781]
-* `moved` blocks: Fixed a typo in the error message that Terraform raises when you use `-target` to exclude an object that has been moved. [GH-33149]
+* core: Transitive dependencies were lost during apply when the referenced resource expanded into zero instances. ([#33403](https://github.com/hashicorp/terraform/issues/33403))
+* cli: Terraform will no longer override SSH settings in local git configuration when installing modules. ([#33592](https://github.com/hashicorp/terraform/issues/33592))
+* `terraform` built-in provider: The upstream dependency that Terraform uses for service discovery of Terraform-native services such as Terraform Cloud/Enterprise state storage was previously not concurrency-safe, but Terraform was treating it as if it was in situations like when a configuration has multiple `terraform_remote_state` blocks all using the "remote" backend. Terraform is now using a newer version of that library which updates its internal caches in a concurrency-safe way. ([#33364](https://github.com/hashicorp/terraform/issues/33364))
 
 ## Previous Releases
 
 For information on prior major and minor releases, see their changelogs:
 
+* [v1.5](https://github.com/hashicorp/terraform/blob/v1.5/CHANGELOG.md)
 * [v1.4](https://github.com/hashicorp/terraform/blob/v1.4/CHANGELOG.md)
 * [v1.3](https://github.com/hashicorp/terraform/blob/v1.3/CHANGELOG.md)
 * [v1.2](https://github.com/hashicorp/terraform/blob/v1.2/CHANGELOG.md)

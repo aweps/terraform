@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package jsonformat
 
@@ -136,6 +136,49 @@ func TestRenderHuman_Imports(t *testing.T) {
 Terraform will perform the following actions:
 
   # test_resource.resource will be imported
+    resource "test_resource" "resource" {
+        id    = "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
+        value = "Hello, World!"
+    }
+
+Plan: 1 to import, 0 to add, 0 to change, 0 to destroy.
+`,
+		},
+		"simple_import_with_generated_config": {
+			plan: Plan{
+				ResourceChanges: []jsonplan.ResourceChange{
+					{
+						Address:      "test_resource.resource",
+						Mode:         "managed",
+						Type:         "test_resource",
+						Name:         "resource",
+						ProviderName: "test",
+						Change: jsonplan.Change{
+							Actions: []string{"no-op"},
+							Before: marshalJson(t, map[string]interface{}{
+								"id":    "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E",
+								"value": "Hello, World!",
+							}),
+							After: marshalJson(t, map[string]interface{}{
+								"id":    "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E",
+								"value": "Hello, World!",
+							}),
+							Importing: &jsonplan.Importing{
+								ID: "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E",
+							},
+							GeneratedConfig: `resource "test_resource" "resource" {
+  id = "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
+  value = "Hello, World!"
+}`,
+						},
+					},
+				},
+			},
+			output: `
+Terraform will perform the following actions:
+
+  # test_resource.resource will be imported
+  # (config will be generated)
     resource "test_resource" "resource" {
         id    = "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
         value = "Hello, World!"
@@ -6944,13 +6987,17 @@ func runTestCases(t *testing.T, testCases map[string]testCase) {
 			}
 
 			tfschemas := &terraform.Schemas{
-				Providers: map[addrs.Provider]*providers.Schemas{
+				Providers: map[addrs.Provider]providers.ProviderSchema{
 					src.ProviderAddr.Provider: {
-						ResourceTypes: map[string]*configschema.Block{
-							src.Addr.Resource.Resource.Type: tc.Schema,
+						ResourceTypes: map[string]providers.Schema{
+							src.Addr.Resource.Resource.Type: {
+								Block: tc.Schema,
+							},
 						},
-						DataSources: map[string]*configschema.Block{
-							src.Addr.Resource.Resource.Type: tc.Schema,
+						DataSources: map[string]providers.Schema{
+							src.Addr.Resource.Resource.Type: {
+								Block: tc.Schema,
+							},
 						},
 					},
 				},

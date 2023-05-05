@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package json
 
@@ -11,9 +11,10 @@ import (
 
 func NewResourceInstanceChange(change *plans.ResourceInstanceChangeSrc) *ResourceInstanceChange {
 	c := &ResourceInstanceChange{
-		Resource: newResourceAddr(change.Addr),
-		Action:   changeAction(change.Action),
-		Reason:   changeReason(change.ActionReason),
+		Resource:        newResourceAddr(change.Addr),
+		Action:          changeAction(change.Action),
+		Reason:          changeReason(change.ActionReason),
+		GeneratedConfig: change.GeneratedConfig,
 	}
 
 	// The order here matters, we want the moved action to take precedence over
@@ -51,6 +52,7 @@ type ResourceInstanceChange struct {
 	Action           ChangeAction  `json:"action"`
 	Reason           ChangeReason  `json:"reason,omitempty"`
 	Importing        *Importing    `json:"importing,omitempty"`
+	GeneratedConfig  string        `json:"generated_config,omitempty"`
 }
 
 func (c *ResourceInstanceChange) String() string {

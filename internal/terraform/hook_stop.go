@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package terraform
 
@@ -71,6 +71,22 @@ func (h *stopHook) PreImportState(addr addrs.AbsResourceInstance, importID strin
 }
 
 func (h *stopHook) PostImportState(addr addrs.AbsResourceInstance, imported []providers.ImportedResource) (HookAction, error) {
+	return h.hook()
+}
+
+func (h *stopHook) PrePlanImport(addr addrs.AbsResourceInstance, importID string) (HookAction, error) {
+	return h.hook()
+}
+
+func (h *stopHook) PostPlanImport(addr addrs.AbsResourceInstance, imported []providers.ImportedResource) (HookAction, error) {
+	return h.hook()
+}
+
+func (h *stopHook) PreApplyImport(addr addrs.AbsResourceInstance, importing plans.ImportingSrc) (HookAction, error) {
+	return h.hook()
+}
+
+func (h *stopHook) PostApplyImport(addr addrs.AbsResourceInstance, importing plans.ImportingSrc) (HookAction, error) {
 	return h.hook()
 }
 

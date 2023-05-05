@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package terraform
 
@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/zclconf/go-cty/cty"
+
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
@@ -17,7 +19,6 @@ import (
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/provisioners"
 	"github.com/hashicorp/terraform/internal/tfdiags"
-	"github.com/zclconf/go-cty/cty"
 )
 
 // NodeValidatableResource represents a resource that is used for validation
@@ -44,6 +45,10 @@ func (n *NodeValidatableResource) Path() addrs.ModuleInstance {
 
 // GraphNodeEvalable
 func (n *NodeValidatableResource) Execute(ctx EvalContext, op walkOperation) (diags tfdiags.Diagnostics) {
+	if n.Config == nil {
+		return diags
+	}
+
 	diags = diags.Append(n.validateResource(ctx))
 
 	diags = diags.Append(n.validateCheckRules(ctx, n.Config))
@@ -271,10 +276,6 @@ func (n *NodeValidatableResource) validateResource(ctx EvalContext) tfdiags.Diag
 	if diags.HasErrors() {
 		return diags
 	}
-	if providerSchema == nil {
-		diags = diags.Append(fmt.Errorf("validateResource has nil schema for %s", n.Addr))
-		return diags
-	}
 
 	keyData := EvalDataForNoInstanceKey
 
@@ -465,7 +466,7 @@ func (n *NodeValidatableResource) validateResource(ctx EvalContext) tfdiags.Diag
 func (n *NodeValidatableResource) evaluateExpr(ctx EvalContext, expr hcl.Expression, wantTy cty.Type, self addrs.Referenceable, keyData instances.RepetitionData) (cty.Value, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 
-	refs, refDiags := lang.ReferencesInExpr(expr)
+	refs, refDiags := lang.ReferencesInExpr(addrs.ParseRef, expr)
 	diags = diags.Append(refDiags)
 
 	scope := ctx.EvaluationScope(self, nil, keyData)

@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 syntax = "proto3";
 package tfplan;
@@ -147,6 +147,10 @@ message Change {
     // Importing, if true, specifies that the resource is being imported as part
     // of the change.
     Importing importing = 5;
+
+    // GeneratedConfig contains any configuration that was generated as part of
+    // the change, as an HCL string.
+    string generated_config = 6;
 }
 
 // ResourceInstanceActionReason sometimes provides some additional user-facing
@@ -249,6 +253,7 @@ message CheckResults {
         RESOURCE = 1;
         OUTPUT_VALUE = 2;
         CHECK = 3;
+        INPUT_VARIABLE = 4;
     }
 
     message ObjectResult {

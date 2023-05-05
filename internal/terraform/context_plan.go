@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package terraform
 
@@ -74,9 +74,20 @@ type PlanOpts struct {
 	// fully-functional new object.
 	ForceReplace []addrs.AbsResourceInstance
 
+	// ExternalReferences allows the external caller to pass in references to
+	// nodes that should not be pruned even if they are not referenced within
+	// the actual graph.
+	ExternalReferences []*addrs.Reference
+
 	// ImportTargets is a list of target resources to import. These resources
 	// will be added to the plan graph.
 	ImportTargets []*ImportTarget
+
+	// GenerateConfig tells Terraform where to write any generated configuration
+	// for any ImportTargets that do not have configuration already.
+	//
+	// If empty, then no config will be generated.
+	GenerateConfigPath string
 }
 
 // Plan generates an execution plan by comparing the given configuration
@@ -292,7 +303,7 @@ func (c *Context) plan(config *configs.Config, prevRunState *states.State, opts 
 		panic(fmt.Sprintf("called Context.plan with %s", opts.Mode))
 	}
 
-	opts.ImportTargets = c.findImportBlocks(config)
+	opts.ImportTargets = c.findImportTargets(config, prevRunState)
 	plan, walkDiags := c.planWalk(config, prevRunState, opts)
 	diags = diags.Append(walkDiags)
 
@@ -513,13 +524,45 @@ func (c *Context) postPlanValidateMoves(config *configs.Config, stmts []refactor
 	return refactoring.ValidateMoves(stmts, config, allInsts)
 }
 
-func (c *Context) findImportBlocks(config *configs.Config) []*ImportTarget {
+// All import target addresses with a key must already exist in config.
+// When we are able to generate config for expanded resources, this rule can be
+// relaxed.
+func (c *Context) postPlanValidateImports(config *configs.Config, importTargets []*ImportTarget, allInst instances.Set) tfdiags.Diagnostics {
+	var diags tfdiags.Diagnostics
+	for _, it := range importTargets {
+		// We only care about import target addresses that have a key.
+		// If the address does not have a key, we don't need it to be in config
+		// because are able to generate config.
+		if it.Addr.Resource.Key == nil {
+			continue
+		}
+
+		if !allInst.HasResourceInstance(it.Addr) {
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Cannot import to non-existent resource address",
+				fmt.Sprintf(
+					"Importing to resource address %s is not possible, because that address does not exist in configuration. Please ensure that the resource key is correct, or remove this import block.",
+					it.Addr,
+				),
+			))
+		}
+	}
+	return diags
+}
+
+// findImportTargets builds a list of import targets by taking the import blocks
+// in the config and filtering out any that target a resource already in state.
+func (c *Context) findImportTargets(config *configs.Config, priorState *states.State) []*ImportTarget {
 	var importTargets []*ImportTarget
 	for _, ic := range config.Module.Import {
-		importTargets = append(importTargets, &ImportTarget{
-			Addr: ic.To,
-			ID:   ic.ID,
-		})
+		if priorState.ResourceInstance(ic.To) == nil {
+			importTargets = append(importTargets, &ImportTarget{
+				Addr:   ic.To,
+				ID:     ic.ID,
+				Config: ic,
+			})
+		}
 	}
 	return importTargets
 }
@@ -561,7 +604,15 @@ func (c *Context) planWalk(config *configs.Config, prevRunState *states.State, o
 	})
 	diags = diags.Append(walker.NonFatalDiagnostics)
 	diags = diags.Append(walkDiags)
-	moveValidateDiags := c.postPlanValidateMoves(config, moveStmts, walker.InstanceExpander.AllInstances())
+
+	allInsts := walker.InstanceExpander.AllInstances()
+
+	importValidateDiags := c.postPlanValidateImports(config, opts.ImportTargets, allInsts)
+	if importValidateDiags.HasErrors() {
+		return nil, importValidateDiags
+	}
+
+	moveValidateDiags := c.postPlanValidateMoves(config, moveStmts, allInsts)
 	if moveValidateDiags.HasErrors() {
 		// If any of the move statements are invalid then those errors take
 		// precedence over any other errors because an incomplete move graph
@@ -598,13 +649,15 @@ func (c *Context) planWalk(config *configs.Config, prevRunState *states.State, o
 	diags = diags.Append(driftDiags)
 
 	plan := &plans.Plan{
-		UIMode:           opts.Mode,
-		Changes:          changes,
-		DriftedResources: driftedResources,
-		PrevRunState:     prevRunState,
-		PriorState:       priorState,
-		Checks:           states.NewCheckResults(walker.Checks),
-		Timestamp:        timestamp,
+		UIMode:             opts.Mode,
+		Changes:            changes,
+		DriftedResources:   driftedResources,
+		PrevRunState:       prevRunState,
+		PriorState:         priorState,
+		PlannedState:       walker.State.Close(),
+		ExternalReferences: opts.ExternalReferences,
+		Checks:             states.NewCheckResults(walker.Checks),
+		Timestamp:          timestamp,
 
 		// Other fields get populated by Context.Plan after we return
 	}
@@ -624,7 +677,9 @@ func (c *Context) planGraph(config *configs.Config, prevRunState *states.State, 
 			skipRefresh:        opts.SkipRefresh,
 			preDestroyRefresh:  opts.PreDestroyRefresh,
 			Operation:          walkPlan,
+			ExternalReferences: opts.ExternalReferences,
 			ImportTargets:      opts.ImportTargets,
+			GenerateConfigPath: opts.GenerateConfigPath,
 		}).Build(addrs.RootModuleInstance)
 		return graph, walkPlan, diags
 	case plans.RefreshOnlyMode:
@@ -637,6 +692,7 @@ func (c *Context) planGraph(config *configs.Config, prevRunState *states.State, 
 			skipRefresh:        opts.SkipRefresh,
 			skipPlanChanges:    true, // this activates "refresh only" mode.
 			Operation:          walkPlan,
+			ExternalReferences: opts.ExternalReferences,
 		}).Build(addrs.RootModuleInstance)
 		return graph, walkPlan, diags
 	case plans.DestroyMode:
