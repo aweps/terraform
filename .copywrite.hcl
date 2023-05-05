@@ -9,5 +9,9 @@ project {
   # files or folders should be ignored
   header_ignore = [
     "**/*.tf",
+    "**/testdata/**",
+    "**/*.pb.go",
+    "**/*_string.go",
+    "**/mock*.go",
   ]
 }

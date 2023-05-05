@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package funcs
 
 import "github.com/zclconf/go-cty/cty/function"
@@ -389,6 +392,10 @@ var DescriptionList = map[string]descriptionEntry{
 	},
 	"startswith": {
 		Description:      "`startswith` takes two values: a string to check and a prefix string. The function returns true if the string begins with that exact prefix.",
+		ParamDescription: []string{"", ""},
+	},
+	"strcontains": {
+		Description:      "`strcontains` takes two values: a string to check and an expected substring. The function returns true if the string has the substring contained within it.",
 		ParamDescription: []string{"", ""},
 	},
 	"strrev": {

@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package lang
 
 import (
@@ -117,6 +120,7 @@ func (s *Scope) Functions() map[string]function.Function {
 			"sort":             stdlib.SortFunc,
 			"split":            stdlib.SplitFunc,
 			"startswith":       funcs.StartsWithFunc,
+			"strcontains":      funcs.StrContainsFunc,
 			"strrev":           stdlib.ReverseFunc,
 			"substr":           stdlib.SubstrFunc,
 			"sum":              funcs.SumFunc,

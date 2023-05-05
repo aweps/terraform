@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 syntax = "proto3";
 package tfplan;
 
@@ -143,7 +146,7 @@ message Change {
 
     // Importing, if true, specifies that the resource is being imported as part
     // of the change.
-    bool importing = 5;
+    Importing importing = 5;
 }
 
 // ResourceInstanceActionReason sometimes provides some additional user-facing
@@ -300,4 +303,11 @@ message Path {
         }
     }
     repeated Step steps = 1;
+}
+
+// Importing contains the embedded metadata about the import operation if this
+// change describes it.
+message Importing {
+    // The original ID of the resource.
+    string id = 1;
 }

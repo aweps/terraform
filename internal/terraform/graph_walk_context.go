@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package terraform
 
 import (
@@ -27,12 +30,13 @@ type ContextGraphWalker struct {
 
 	// Configurable values
 	Context            *Context
-	State              *states.SyncState       // Used for safe concurrent access to state
-	RefreshState       *states.SyncState       // Used for safe concurrent access to state
-	PrevRunState       *states.SyncState       // Used for safe concurrent access to state
-	Changes            *plans.ChangesSync      // Used for safe concurrent writes to changes
-	Checks             *checks.State           // Used for safe concurrent writes of checkable objects and their check results
-	InstanceExpander   *instances.Expander     // Tracks our gradual expansion of module and resource instances
+	State              *states.SyncState   // Used for safe concurrent access to state
+	RefreshState       *states.SyncState   // Used for safe concurrent access to state
+	PrevRunState       *states.SyncState   // Used for safe concurrent access to state
+	Changes            *plans.ChangesSync  // Used for safe concurrent writes to changes
+	Checks             *checks.State       // Used for safe concurrent writes of checkable objects and their check results
+	InstanceExpander   *instances.Expander // Tracks our gradual expansion of module and resource instances
+	Imports            []configs.Import
 	MoveResults        refactoring.MoveResults // Read-only record of earlier processing of move statements
 	Operation          walkOperation
 	StopContext        context.Context

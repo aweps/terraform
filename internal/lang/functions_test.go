@@ -1,3 +1,6 @@
+// Copyright (c) HashiCorp, Inc.
+// SPDX-License-Identifier: MPL-2.0
+
 package lang
 
 import (
@@ -903,6 +906,17 @@ func TestFunctions(t *testing.T) {
 			{
 				`startswith(" ", "hello")`,
 				cty.False,
+			},
+		},
+
+		"strcontains": {
+			{
+				`strcontains("hello", "llo")`,
+				cty.BoolVal(true),
+			},
+			{
+				`strcontains("hello", "a")`,
+				cty.BoolVal(false),
 			},
 		},
 
