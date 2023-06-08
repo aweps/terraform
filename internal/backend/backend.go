@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 // Package backend provides interfaces that the CLI uses to interact with
 // Terraform. A backend provides the abstraction that allows the same CLI
@@ -14,6 +14,7 @@ import (
 	"log"
 	"os"
 
+	svchost "github.com/hashicorp/terraform-svchost"
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/command/clistate"
 	"github.com/hashicorp/terraform/internal/command/views"
@@ -119,6 +120,13 @@ type Backend interface {
 	Workspaces() ([]string, error)
 }
 
+// HostAlias describes a list of aliases that should be used when initializing an
+// Enhanced Backend
+type HostAlias struct {
+	From svchost.Hostname
+	To   svchost.Hostname
+}
+
 // Enhanced implements additional behavior on top of a normal backend.
 //
 // 'Enhanced' backends are an implementation detail only, and are no longer reflected as an external
@@ -136,6 +144,10 @@ type Enhanced interface {
 	// responsibility of the Backend to lock the state for the duration of the
 	// running operation.
 	Operation(context.Context, *Operation) (*RunningOperation, error)
+
+	// ServiceDiscoveryAliases returns a mapping of Alias -> Target hosts to
+	// configure.
+	ServiceDiscoveryAliases() ([]HostAlias, error)
 }
 
 // Local implements additional behavior on a Backend that allows local
@@ -258,7 +270,7 @@ type Operation struct {
 
 	// Plan is a plan that was passed as an argument. This is valid for
 	// plan and apply arguments but may not work for all backends.
-	PlanFile *planfile.Reader
+	PlanFile *planfile.WrappedPlanFile
 
 	// The options below are more self-explanatory and affect the runtime
 	// behavior of the operation.
@@ -295,6 +307,11 @@ type Operation struct {
 	// Workspace is the name of the workspace that this operation should run
 	// in, which controls which named state is used.
 	Workspace string
+
+	// GenerateConfigOut tells the operation both that it should generate config
+	// for unmatched import targets and where any generated config should be
+	// written to.
+	GenerateConfigOut string
 }
 
 // HasConfig returns true if and only if the operation has a ConfigDir value

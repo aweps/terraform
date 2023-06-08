@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package json
 
@@ -37,6 +37,9 @@ func (cs *ChangeSummary) String() string {
 
 	switch cs.Operation {
 	case OperationApplied:
+		if cs.Import > 0 {
+			return fmt.Sprintf("Apply complete! Resources: %d imported, %d added, %d changed, %d destroyed.", cs.Import, cs.Add, cs.Change, cs.Remove)
+		}
 		return fmt.Sprintf("Apply complete! Resources: %d added, %d changed, %d destroyed.", cs.Add, cs.Change, cs.Remove)
 	case OperationDestroyed:
 		return fmt.Sprintf("Destroy complete! Resources: %d destroyed.", cs.Remove)

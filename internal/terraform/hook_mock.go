@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package terraform
 
@@ -110,6 +110,26 @@ type MockHook struct {
 	PostImportStateNewStates []providers.ImportedResource
 	PostImportStateReturn    HookAction
 	PostImportStateError     error
+
+	PrePlanImportCalled bool
+	PrePlanImportAddr   addrs.AbsResourceInstance
+	PrePlanImportReturn HookAction
+	PrePlanImportError  error
+
+	PostPlanImportAddr   addrs.AbsResourceInstance
+	PostPlanImportCalled bool
+	PostPlanImportReturn HookAction
+	PostPlanImportError  error
+
+	PreApplyImportCalled bool
+	PreApplyImportAddr   addrs.AbsResourceInstance
+	PreApplyImportReturn HookAction
+	PreApplyImportError  error
+
+	PostApplyImportCalled bool
+	PostApplyImportAddr   addrs.AbsResourceInstance
+	PostApplyImportReturn HookAction
+	PostApplyImportError  error
 
 	StoppingCalled bool
 
@@ -267,6 +287,33 @@ func (h *MockHook) PostImportState(addr addrs.AbsResourceInstance, imported []pr
 	h.PostImportStateAddr = addr
 	h.PostImportStateNewStates = imported
 	return h.PostImportStateReturn, h.PostImportStateError
+}
+
+func (h *MockHook) PrePlanImport(addr addrs.AbsResourceInstance, importID string) (HookAction, error) {
+	h.PrePlanImportCalled = true
+	h.PrePlanImportAddr = addr
+	return h.PrePlanImportReturn, h.PrePlanImportError
+}
+
+func (h *MockHook) PostPlanImport(addr addrs.AbsResourceInstance, imported []providers.ImportedResource) (HookAction, error) {
+	h.PostPlanImportCalled = true
+	h.PostPlanImportAddr = addr
+	return h.PostPlanImportReturn, h.PostPlanImportError
+}
+
+func (h *MockHook) PreApplyImport(addr addrs.AbsResourceInstance, importing plans.ImportingSrc) (HookAction, error) {
+	h.PreApplyImportCalled = true
+	h.PreApplyImportAddr = addr
+	return h.PreApplyImportReturn, h.PreApplyImportError
+}
+
+func (h *MockHook) PostApplyImport(addr addrs.AbsResourceInstance, importing plans.ImportingSrc) (HookAction, error) {
+	h.Lock()
+	defer h.Unlock()
+
+	h.PostApplyImportCalled = true
+	h.PostApplyImportAddr = addr
+	return h.PostApplyImportReturn, h.PostApplyImportError
 }
 
 func (h *MockHook) Stopping() {
