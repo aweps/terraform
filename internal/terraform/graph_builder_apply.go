@@ -99,8 +99,8 @@ func (b *ApplyGraphBuilder) Steps() []GraphTransformer {
 		&ModuleVariableTransformer{Config: b.Config},
 		&LocalTransformer{Config: b.Config},
 		&OutputTransformer{
-			Config:       b.Config,
-			ApplyDestroy: b.Operation == walkDestroy,
+			Config:     b.Config,
+			Destroying: b.Operation == walkDestroy,
 		},
 
 		// Creates all the resource instances represented in the diff, along
@@ -147,6 +147,10 @@ func (b *ApplyGraphBuilder) Steps() []GraphTransformer {
 		// Connect references so ordering is correct
 		&ReferenceTransformer{},
 		&AttachDependenciesTransformer{},
+
+		// Nested data blocks should be loaded after every other resource has
+		// done its thing.
+		&checkStartTransformer{Config: b.Config, Operation: b.Operation},
 
 		// Detect when create_before_destroy must be forced on for a particular
 		// node due to dependency edges, to avoid graph cycles during apply.
