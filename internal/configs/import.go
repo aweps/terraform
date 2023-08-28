@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package configs
 
@@ -10,7 +10,7 @@ import (
 )
 
 type Import struct {
-	ID string
+	ID hcl.Expression
 	To addrs.AbsResourceInstance
 
 	ProviderConfigRef *ProviderConfigRef
@@ -30,9 +30,7 @@ func decodeImportBlock(block *hcl.Block) (*Import, hcl.Diagnostics) {
 	diags = append(diags, moreDiags...)
 
 	if attr, exists := content.Attributes["id"]; exists {
-		attrDiags := gohcl.DecodeExpression(attr.Expr, nil, &imp.ID)
-		diags = append(diags, attrDiags...)
-
+		imp.ID = attr.Expr
 	}
 
 	if attr, exists := content.Attributes["to"]; exists {
