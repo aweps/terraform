@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package terraform
 
@@ -107,10 +107,6 @@ func (n *nodeExpandOutput) DynamicExpand(ctx EvalContext) (*Graph, error) {
 				Addr:     absAddr,
 				Planning: n.Planning,
 			}
-
-		case n.Destroying:
-			// nothing is done here for non-root outputs
-			continue
 
 		default:
 			node = &NodeApplyableOutput{
@@ -282,16 +278,16 @@ func (n *NodeApplyableOutput) ReferenceableAddrs() []addrs.Referenceable {
 func referencesForOutput(c *configs.Output) []*addrs.Reference {
 	var refs []*addrs.Reference
 
-	impRefs, _ := lang.ReferencesInExpr(c.Expr)
-	expRefs, _ := lang.References(c.DependsOn)
+	impRefs, _ := lang.ReferencesInExpr(addrs.ParseRef, c.Expr)
+	expRefs, _ := lang.References(addrs.ParseRef, c.DependsOn)
 
 	refs = append(refs, impRefs...)
 	refs = append(refs, expRefs...)
 
 	for _, check := range c.Preconditions {
-		condRefs, _ := lang.ReferencesInExpr(check.Condition)
+		condRefs, _ := lang.ReferencesInExpr(addrs.ParseRef, check.Condition)
 		refs = append(refs, condRefs...)
-		errRefs, _ := lang.ReferencesInExpr(check.ErrorMessage)
+		errRefs, _ := lang.ReferencesInExpr(addrs.ParseRef, check.ErrorMessage)
 		refs = append(refs, errRefs...)
 	}
 

@@ -1,5 +1,5 @@
 // Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: BUSL-1.1
 
 package command
 
@@ -382,10 +382,12 @@ func providerFactory(meta *providercache.CachedProvider) providers.Factory {
 		case 5:
 			p := raw.(*tfplugin.GRPCProvider)
 			p.PluginClient = client
+			p.Addr = meta.Provider
 			return p, nil
 		case 6:
 			p := raw.(*tfplugin6.GRPCProvider)
 			p.PluginClient = client
+			p.Addr = meta.Provider
 			return p, nil
 		default:
 			panic("unsupported protocol version")
