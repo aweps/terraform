@@ -421,7 +421,6 @@ func (m *Module) appendFile(file *File) hcl.Diagnostics {
 	// another at this level. (We handle any references between them at
 	// runtime.)
 	m.Moved = append(m.Moved, file.Moved...)
-	m.Import = append(m.Import, file.Import...)
 
 	m.Removed = append(m.Removed, file.Removed...)
 

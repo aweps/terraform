@@ -141,6 +141,7 @@ func (n *NodePlannableResourceInstance) managedResourceExecute(ctx EvalContext) 
 	addr := n.ResourceInstanceAddr()
 
 	var instanceRefreshState *states.ResourceInstanceObject
+	var generateConfig bool
 
 	checkRuleSeverity := tfdiags.Error
 	if n.skipPlanChanges || n.preDestroyRefresh {
