@@ -48,6 +48,22 @@ func (p *Parser) LoadTestFile(path string) (*TestFile, hcl.Diagnostics) {
 	return test, diags
 }
 
+// LoadMockDataFile reads the file at the given path and parses it as a
+// Terraform mock data file.
+//
+// It references the same LoadHCLFile as LoadConfigFile, so inherits the same
+// syntax selection behaviours.
+func (p *Parser) LoadMockDataFile(path string) (*MockData, hcl.Diagnostics) {
+	body, diags := p.LoadHCLFile(path)
+	if body == nil {
+		return nil, diags
+	}
+
+	data, dataDiags := decodeMockDataBody(body, MockDataFileOverrideSource)
+	diags = append(diags, dataDiags...)
+	return data, diags
+}
+
 func (p *Parser) loadConfigFile(path string, override bool) (*File, hcl.Diagnostics) {
 	body, diags := p.LoadHCLFile(path)
 	if body == nil {
@@ -180,6 +196,13 @@ func (p *Parser) loadConfigFile(path string, override bool) (*File, hcl.Diagnost
 				file.Moved = append(file.Moved, cfg)
 			}
 
+		case "removed":
+			cfg, cfgDiags := decodeRemovedBlock(block)
+			diags = append(diags, cfgDiags...)
+			if cfg != nil {
+				file.Removed = append(file.Removed, cfg)
+			}
+
 		case "import":
 			cfg, cfgDiags := decodeImportBlock(block)
 			diags = append(diags, cfgDiags...)
@@ -283,6 +306,9 @@ var configFileSchema = &hcl.BodySchema{
 		},
 		{
 			Type: "moved",
+		},
+		{
+			Type: "removed",
 		},
 		{
 			Type: "import",

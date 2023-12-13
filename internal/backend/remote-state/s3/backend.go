@@ -18,13 +18,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	awsbase "github.com/hashicorp/aws-sdk-go-base/v2"
-	basediag "github.com/hashicorp/aws-sdk-go-base/v2/diag"
+	baselogging "github.com/hashicorp/aws-sdk-go-base/v2/logging"
+	"github.com/hashicorp/aws-sdk-go-base/v2/validation"
 	"github.com/hashicorp/terraform/internal/backend"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
 	"github.com/hashicorp/terraform/internal/tfdiags"
 	"github.com/hashicorp/terraform/version"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/gocty"
+	"golang.org/x/exp/maps"
 )
 
 func New() backend.Backend {
@@ -44,6 +46,7 @@ type Backend struct {
 	kmsKeyID              string
 	ddbTable              string
 	workspaceKeyPrefix    string
+	skipS3Checksum        bool
 }
 
 // ConfigSchema returns a description of the expected configuration
@@ -66,11 +69,26 @@ func (b *Backend) ConfigSchema() *configschema.Block {
 				Optional:    true,
 				Description: "AWS region of the S3 Bucket and DynamoDB Table (if used).",
 			},
+			"allowed_account_ids": {
+				Type:        cty.Set(cty.String),
+				Optional:    true,
+				Description: "List of allowed AWS account IDs.",
+			},
 			"dynamodb_endpoint": {
 				Type:        cty.String,
 				Optional:    true,
 				Description: "A custom endpoint for the DynamoDB API",
 				Deprecated:  true,
+			},
+			"ec2_metadata_service_endpoint": {
+				Type:        cty.String,
+				Optional:    true,
+				Description: "Address of the EC2 metadata service (IMDS) endpoint to use.",
+			},
+			"ec2_metadata_service_endpoint_mode": {
+				Type:        cty.String,
+				Optional:    true,
+				Description: "Mode to use in communicating with the metadata service.",
 			},
 			"endpoint": {
 				Type:        cty.String,
@@ -78,32 +96,13 @@ func (b *Backend) ConfigSchema() *configschema.Block {
 				Description: "A custom endpoint for the S3 API",
 				Deprecated:  true,
 			},
-			"endpoints": {
-				NestedType: &configschema.Object{
-					Nesting: configschema.NestingSingle,
-					Attributes: map[string]*configschema.Attribute{
-						"dynamodb": {
-							Type:        cty.String,
-							Optional:    true,
-							Description: "A custom endpoint for the DynamoDB API",
-						},
-						"iam": {
-							Type:        cty.String,
-							Optional:    true,
-							Description: "A custom endpoint for the IAM API",
-						},
-						"s3": {
-							Type:        cty.String,
-							Optional:    true,
-							Description: "A custom endpoint for the S3 API",
-						},
-						"sts": {
-							Type:        cty.String,
-							Optional:    true,
-							Description: "A custom endpoint for the STS API",
-						},
-					},
-				},
+
+			"endpoints": endpointsSchema.SchemaAttribute(),
+
+			"forbidden_account_ids": {
+				Type:        cty.Set(cty.String),
+				Optional:    true,
+				Description: "List of forbidden AWS account IDs.",
 			},
 			"iam_endpoint": {
 				Type:        cty.String,
@@ -116,6 +115,11 @@ func (b *Backend) ConfigSchema() *configschema.Block {
 				Optional:    true,
 				Description: "A custom endpoint for the STS API",
 				Deprecated:  true,
+			},
+			"sts_region": {
+				Type:        cty.String,
+				Optional:    true,
+				Description: "AWS region for STS.",
 			},
 			"encrypt": {
 				Type:        cty.Bool,
@@ -152,6 +156,11 @@ func (b *Backend) ConfigSchema() *configschema.Block {
 				Optional:    true,
 				Description: "AWS profile name",
 			},
+			"retry_mode": {
+				Type:        cty.String,
+				Optional:    true,
+				Description: "Specifies how retries are attempted.",
+			},
 			"shared_config_files": {
 				Type:        cty.Set(cty.String),
 				Optional:    true,
@@ -176,7 +185,12 @@ func (b *Backend) ConfigSchema() *configschema.Block {
 			"skip_credentials_validation": {
 				Type:        cty.Bool,
 				Optional:    true,
-				Description: "Skip the credentials validation via STS API.",
+				Description: "Skip the credentials validation via STS API. Useful for testing and for AWS API implementations that do not have STS available.",
+			},
+			"skip_requesting_account_id": {
+				Type:        cty.Bool,
+				Optional:    true,
+				Description: "Skip the requesting account ID. Useful for AWS API implementations that do not have the IAM, STS API, or metadata API.",
 			},
 			"skip_metadata_api_check": {
 				Type:        cty.Bool,
@@ -187,6 +201,11 @@ func (b *Backend) ConfigSchema() *configschema.Block {
 				Type:        cty.Bool,
 				Optional:    true,
 				Description: "Skip static validation of region name.",
+			},
+			"skip_s3_checksum": {
+				Type:        cty.Bool,
+				Optional:    true,
+				Description: "Do not include checksum when uploading S3 Objects. Useful for some S3-Compatible APIs.",
 			},
 			"sse_customer_key": {
 				Type:        cty.String,
@@ -257,7 +276,14 @@ func (b *Backend) ConfigSchema() *configschema.Block {
 			"force_path_style": {
 				Type:        cty.Bool,
 				Optional:    true,
-				Description: "Force s3 to use path style api.",
+				Description: "Enable path-style S3 URLs.",
+				Deprecated:  true,
+			},
+
+			"use_path_style": {
+				Type:        cty.Bool,
+				Optional:    true,
+				Description: "Enable path-style S3 URLs.",
 			},
 
 			"max_retries": {
@@ -266,27 +292,359 @@ func (b *Backend) ConfigSchema() *configschema.Block {
 				Description: "The maximum number of times an AWS API request is retried on retryable failure.",
 			},
 
-			"assume_role": {
-				NestedType: &configschema.Object{
-					Nesting:    configschema.NestingSingle,
-					Attributes: assumeRoleFullSchema().SchemaAttributes(),
-				},
-			},
+			"assume_role": assumeRoleSchema.SchemaAttribute(),
 
-			"assume_role_with_web_identity": {
-				NestedType: &configschema.Object{
-					Nesting:    configschema.NestingSingle,
-					Attributes: assumeRoleWithWebIdentityFullSchema().SchemaAttributes(),
-				},
-			},
+			"assume_role_with_web_identity": assumeRoleWithWebIdentitySchema.SchemaAttribute(),
 
 			"use_legacy_workflow": {
 				Type:        cty.Bool,
 				Optional:    true,
 				Description: "Use the legacy authentication workflow, preferring environment variables over backend configuration.",
+				Deprecated:  true,
+			},
+
+			"custom_ca_bundle": {
+				Type:        cty.String,
+				Optional:    true,
+				Description: "File containing custom root and intermediate certificates.",
+			},
+
+			"http_proxy": {
+				Type:        cty.String,
+				Optional:    true,
+				Description: "URL of a proxy to use for HTTP requests when accessing the AWS API.",
+			},
+
+			"https_proxy": {
+				Type:        cty.String,
+				Optional:    true,
+				Description: "URL of a proxy to use for HTTPS requests when accessing the AWS API.",
+			},
+
+			"no_proxy": {
+				Type:        cty.String,
+				Optional:    true,
+				Description: "Comma-separated list of hosts that should not use HTTP or HTTPS proxies.",
+			},
+
+			"insecure": {
+				Type:        cty.Bool,
+				Optional:    true,
+				Description: "Whether to explicitly allow the backend to perform insecure SSL requests.",
+			},
+			"use_fips_endpoint": {
+				Type:        cty.Bool,
+				Optional:    true,
+				Description: "Force the backend to resolve endpoints with FIPS capability.",
+			},
+			"use_dualstack_endpoint": {
+				Type:        cty.Bool,
+				Optional:    true,
+				Description: "Force the backend to resolve endpoints with DualStack capability.",
 			},
 		},
 	}
+}
+
+var assumeRoleSchema = singleNestedAttribute{
+	Attributes: map[string]schemaAttribute{
+		"role_arn": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Required:    true,
+				Description: "The role to be assumed.",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateARN(
+						validateIAMRoleARN,
+					),
+				},
+			},
+		},
+
+		"duration": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "The duration, between 15 minutes and 12 hours, of the role session. Valid time units are ns, us (or µs), ms, s, h, or m.",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateDuration(
+						validateDurationBetween(15*time.Minute, 12*time.Hour),
+					),
+				},
+			},
+		},
+
+		"external_id": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "The external ID to use when assuming the role",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateStringLenBetween(2, 1224),
+					validateStringMatches(
+						regexp.MustCompile(`^[\w+=,.@:\/\-]*$`),
+						`Value can only contain letters, numbers, or the following characters: =,.@/-`,
+					),
+				},
+			},
+		},
+
+		"policy": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "IAM Policy JSON describing further restricting permissions for the IAM Role being assumed.",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateStringNotEmpty,
+					validateIAMPolicyDocument,
+				},
+			},
+		},
+
+		"policy_arns": setAttribute{
+			configschema.Attribute{
+				Type:        cty.Set(cty.String),
+				Optional:    true,
+				Description: "Amazon Resource Names (ARNs) of IAM Policies describing further restricting permissions for the IAM Role being assumed.",
+			},
+			validateSet{
+				Validators: []setValidator{
+					validateSetStringElements(
+						validateARN(
+							validateIAMPolicyARN,
+						),
+					),
+				},
+			},
+		},
+
+		"session_name": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "The session name to use when assuming the role.",
+			},
+			validateString{
+				Validators: assumeRoleNameValidator,
+			},
+		},
+
+		"source_identity": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "Source identity specified by the principal assuming the role.",
+			},
+			validateString{
+				Validators: assumeRoleNameValidator,
+			},
+		},
+
+		"tags": mapAttribute{
+			configschema.Attribute{
+				Type:        cty.Map(cty.String),
+				Optional:    true,
+				Description: "Assume role session tags.",
+			},
+			validateMap{},
+		},
+
+		"transitive_tag_keys": setAttribute{
+			configschema.Attribute{
+				Type:        cty.Set(cty.String),
+				Optional:    true,
+				Description: "Assume role session tag keys to pass to any subsequent sessions.",
+			},
+			validateSet{},
+		},
+	},
+}
+
+var assumeRoleWithWebIdentitySchema = singleNestedAttribute{
+	Attributes: map[string]schemaAttribute{
+		"role_arn": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Required:    true,
+				Description: "The role to be assumed.",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateARN(
+						validateIAMRoleARN,
+					),
+				},
+			},
+		},
+
+		"duration": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "The duration, between 15 minutes and 12 hours, of the role session. Valid time units are ns, us (or µs), ms, s, h, or m.",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateDuration(
+						validateDurationBetween(15*time.Minute, 12*time.Hour),
+					),
+				},
+			},
+		},
+
+		"policy": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "IAM Policy JSON describing further restricting permissions for the IAM Role being assumed.",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateStringNotEmpty,
+					validateIAMPolicyDocument,
+				},
+			},
+		},
+
+		"policy_arns": setAttribute{
+			configschema.Attribute{
+				Type:        cty.Set(cty.String),
+				Optional:    true,
+				Description: "Amazon Resource Names (ARNs) of IAM Policies describing further restricting permissions for the IAM Role being assumed.",
+			},
+			validateSet{
+				Validators: []setValidator{
+					validateSetStringElements(
+						validateARN(
+							validateIAMPolicyARN,
+						),
+					),
+				},
+			},
+		},
+
+		"session_name": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "The session name to use when assuming the role.",
+			},
+			validateString{
+				Validators: assumeRoleNameValidator,
+			},
+		},
+
+		"web_identity_token": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "Value of a web identity token from an OpenID Connect (OIDC) or OAuth provider.",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateStringLenBetween(4, 20000),
+				},
+			},
+		},
+
+		"web_identity_token_file": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "File containing a web identity token from an OpenID Connect (OIDC) or OAuth provider.",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateStringLenBetween(4, 20000),
+				},
+			},
+		},
+	},
+	validateObject: validateObject{
+		Validators: []objectValidator{
+			validateExactlyOneOfAttributes(
+				cty.GetAttrPath("web_identity_token"),
+				cty.GetAttrPath("web_identity_token_file"),
+			),
+		},
+	},
+}
+
+var endpointsSchema = singleNestedAttribute{
+	Attributes: map[string]schemaAttribute{
+		"dynamodb": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "A custom endpoint for the DynamoDB API",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateStringLegacyURL,
+				},
+			},
+		},
+
+		"iam": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "A custom endpoint for the IAM API",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateStringLegacyURL,
+				},
+			},
+		},
+
+		"s3": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "A custom endpoint for the S3 API",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateStringLegacyURL,
+				},
+			},
+		},
+
+		"sso": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "A custom endpoint for the IAM Identity Center (formerly known as SSO) API",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateStringValidURL,
+				},
+			},
+		},
+
+		"sts": stringAttribute{
+			configschema.Attribute{
+				Type:        cty.String,
+				Optional:    true,
+				Description: "A custom endpoint for the STS API",
+			},
+			validateString{
+				Validators: []stringValidator{
+					validateStringLegacyURL,
+				},
+			},
+		},
+	},
 }
 
 // PrepareConfig checks the validity of the values in the given
@@ -321,6 +679,7 @@ func (b *Backend) PrepareConfig(obj cty.Value) (cty.Value, tfdiags.Diagnostics) 
 			Validators: []stringValidator{
 				validateStringNotEmpty,
 				validateStringS3Path,
+				validateStringDoesNotContain("//"),
 			},
 		}
 		keyValidators.ValidateAttr(val, attrPath, &diags)
@@ -375,7 +734,7 @@ func (b *Backend) PrepareConfig(obj cty.Value) (cty.Value, tfdiags.Diagnostics) 
 	}
 
 	if val := obj.GetAttr("assume_role"); !val.IsNull() {
-		diags = diags.Append(prepareAssumeRoleConfig(val, cty.GetAttrPath("assume_role")))
+		validateNestedAttribute(assumeRoleSchema, val, cty.GetAttrPath("assume_role"), &diags)
 
 		if defined := findDeprecatedFields(obj, assumeRoleDeprecatedFields); len(defined) != 0 {
 			diags = diags.Append(tfdiags.WholeContainingBody(
@@ -396,7 +755,7 @@ func (b *Backend) PrepareConfig(obj cty.Value) (cty.Value, tfdiags.Diagnostics) 
 	}
 
 	if val := obj.GetAttr("assume_role_with_web_identity"); !val.IsNull() {
-		diags = diags.Append(prepareAssumeRoleWithWebIdentityConfig(val, cty.GetAttrPath("assume_role_with_web_identity")))
+		validateNestedAttribute(assumeRoleWithWebIdentitySchema, val, cty.GetAttrPath("assume_role_with_web_identity"), &diags)
 	}
 
 	validateAttributesConflict(
@@ -436,6 +795,76 @@ func (b *Backend) PrepareConfig(obj cty.Value) (cty.Value, tfdiags.Diagnostics) 
 				))
 			}
 		}
+	}
+
+	if val := obj.GetAttr("endpoints"); !val.IsNull() {
+		validateNestedAttribute(endpointsSchema, val, cty.GetAttrPath("endpoints"), &diags)
+	}
+
+	endpointValidators := validateString{
+		Validators: []stringValidator{
+			validateStringLegacyURL,
+		},
+	}
+	for _, k := range maps.Keys(endpointFields) {
+		if val := obj.GetAttr(k); !val.IsNull() {
+			attrPath := cty.GetAttrPath(k)
+			endpointValidators.ValidateAttr(val, attrPath, &diags)
+		}
+	}
+
+	if val := obj.GetAttr("ec2_metadata_service_endpoint"); !val.IsNull() {
+		attrPath := cty.GetAttrPath("ec2_metadata_service_endpoint")
+		ec2MetadataEndpointValidators := validateString{
+			Validators: []stringValidator{
+				validateStringValidURL,
+			},
+		}
+		ec2MetadataEndpointValidators.ValidateAttr(val, attrPath, &diags)
+	}
+
+	validateAttributesConflict(
+		cty.GetAttrPath("force_path_style"),
+		cty.GetAttrPath("use_path_style"),
+	)(obj, cty.Path{}, &diags)
+
+	attrPath = cty.GetAttrPath("force_path_style")
+	if val := obj.GetAttr("force_path_style"); !val.IsNull() {
+		diags = diags.Append(deprecatedAttrDiag(attrPath, cty.GetAttrPath("use_path_style")))
+	}
+
+	attrPath = cty.GetAttrPath("retry_mode")
+	if val := obj.GetAttr("retry_mode"); !val.IsNull() {
+		retryModeValidators := validateString{
+			Validators: []stringValidator{
+				validateStringRetryMode,
+			},
+		}
+		retryModeValidators.ValidateAttr(val, attrPath, &diags)
+	}
+
+	attrPath = cty.GetAttrPath("ec2_metadata_service_endpoint_mode")
+	if val := obj.GetAttr("ec2_metadata_service_endpoint_mode"); !val.IsNull() {
+		endpointModeValidators := validateString{
+			Validators: []stringValidator{
+				validateStringInSlice(awsbase.EC2MetadataEndpointMode_Values()),
+			},
+		}
+		endpointModeValidators.ValidateAttr(val, attrPath, &diags)
+	}
+
+	validateAttributesConflict(
+		cty.GetAttrPath("allowed_account_ids"),
+		cty.GetAttrPath("forbidden_account_ids"),
+	)(obj, cty.Path{}, &diags)
+
+	attrPath = cty.GetAttrPath("use_legacy_workflow")
+	if val := obj.GetAttr("use_legacy_workflow"); !val.IsNull() {
+		diags = diags.Append(attributeWarningDiag(
+			"Deprecated Parameter",
+			fmt.Sprintf(`The parameter "%s" is deprecated. The ability to override the default credential chain ordering will be removed in a future minor version.`, pathString(attrPath)),
+			attrPath,
+		))
 	}
 
 	return obj, diags
@@ -479,6 +908,8 @@ func formatDeprecations(attrs map[string]string) string {
 // via PrepareConfig.
 func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 	ctx := context.TODO()
+	log := logger()
+	log = logWithOperation(log, operationBackendConfigure)
 
 	var diags tfdiags.Diagnostics
 	if obj.IsNull() {
@@ -491,7 +922,7 @@ func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 	}
 
 	if region != "" && !boolAttr(obj, "skip_region_validation") {
-		if err := awsbase.ValidateRegion(region); err != nil {
+		if err := validation.SupportedRegion(region); err != nil {
 			diags = diags.Append(tfdiags.AttributeValue(
 				tfdiags.Error,
 				"Invalid region value",
@@ -504,11 +935,18 @@ func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 
 	b.bucketName = stringAttr(obj, "bucket")
 	b.keyName = stringAttr(obj, "key")
+
+	log = log.With(
+		logKeyBucket, b.bucketName,
+		logKeyPath, b.keyName,
+	)
+
 	b.acl = stringAttr(obj, "acl")
 	b.workspaceKeyPrefix = stringAttrDefault(obj, "workspace_key_prefix", "env:")
 	b.serverSideEncryption = boolAttr(obj, "encrypt")
 	b.kmsKeyID = stringAttr(obj, "kms_key_id")
 	b.ddbTable = stringAttr(obj, "dynamodb_table")
+	b.skipS3Checksum = boolAttr(obj, "skip_s3_checksum")
 
 	if _, ok := stringAttrOk(obj, "kms_key_id"); ok {
 		if customerKey := os.Getenv("AWS_SSE_CUSTOMER_KEY"); customerKey != "" {
@@ -557,28 +995,35 @@ func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 		}
 	}
 
-	for envvar, replacement := range map[string]string{
+	endpointEnvvars := map[string]string{
 		"AWS_DYNAMODB_ENDPOINT": "AWS_ENDPOINT_URL_DYNAMODB",
 		"AWS_IAM_ENDPOINT":      "AWS_ENDPOINT_URL_IAM",
 		"AWS_S3_ENDPOINT":       "AWS_ENDPOINT_URL_S3",
 		"AWS_STS_ENDPOINT":      "AWS_ENDPOINT_URL_STS",
-	} {
+		"AWS_METADATA_URL":      "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+	}
+	for envvar, replacement := range endpointEnvvars {
 		if val := os.Getenv(envvar); val != "" {
 			diags = diags.Append(deprecatedEnvVarDiag(envvar, replacement))
 		}
 	}
 
+	ctx, baselog := baselogging.NewHcLogger(ctx, log)
+
 	cfg := &awsbase.Config{
-		AccessKey:              stringAttr(obj, "access_key"),
-		APNInfo:                stdUserAgentProducts(),
-		CallerDocumentationURL: "https://www.terraform.io/docs/language/settings/backends/s3.html",
-		CallerName:             "S3 Backend",
-		MaxRetries:             intAttrDefault(obj, "max_retries", 5),
-		Profile:                stringAttr(obj, "profile"),
-		Region:                 stringAttr(obj, "region"),
-		SecretKey:              stringAttr(obj, "secret_key"),
-		SkipCredsValidation:    boolAttr(obj, "skip_credentials_validation"),
-		Token:                  stringAttr(obj, "token"),
+		AccessKey:               stringAttr(obj, "access_key"),
+		APNInfo:                 stdUserAgentProducts(),
+		CallerDocumentationURL:  "https://www.terraform.io/docs/language/settings/backends/s3.html",
+		CallerName:              "S3 Backend",
+		Logger:                  baselog,
+		MaxRetries:              intAttrDefault(obj, "max_retries", 5),
+		Profile:                 stringAttr(obj, "profile"),
+		HTTPProxyMode:           awsbase.HTTPProxyModeLegacy,
+		Region:                  stringAttr(obj, "region"),
+		SecretKey:               stringAttr(obj, "secret_key"),
+		SkipCredsValidation:     boolAttr(obj, "skip_credentials_validation"),
+		SkipRequestingAccountId: boolAttr(obj, "skip_requesting_account_id"),
+		Token:                   stringAttr(obj, "token"),
 	}
 
 	// The "legacy" authentication workflow used in aws-sdk-go-base V1 will be
@@ -587,11 +1032,7 @@ func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 	// 1.6 - Default to `true` (prefer existing behavior, "opt-out" for new behavior)
 	// 1.7 - Default to `false` (prefer new behavior, "opt-in" for legacy behavior)
 	// 1.8 - Remove argument, legacy workflow no longer supported
-	if val, ok := boolAttrOk(obj, "use_legacy_workflow"); ok {
-		cfg.UseLegacyWorkflow = val
-	} else {
-		cfg.UseLegacyWorkflow = true
-	}
+	cfg.UseLegacyWorkflow = boolAttr(obj, "use_legacy_workflow")
 
 	if val, ok := boolAttrOk(obj, "skip_metadata_api_check"); ok {
 		if val {
@@ -599,6 +1040,21 @@ func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 		} else {
 			cfg.EC2MetadataServiceEnableState = imds.ClientEnabled
 		}
+	}
+
+	if v, ok := retrieveArgument(&diags,
+		newAttributeRetriever(obj, cty.GetAttrPath("ec2_metadata_service_endpoint")),
+		newEnvvarRetriever("AWS_EC2_METADATA_SERVICE_ENDPOINT"),
+		newEnvvarRetriever("AWS_METADATA_URL"),
+	); ok {
+		cfg.EC2MetadataServiceEndpoint = v
+	}
+
+	if v, ok := retrieveArgument(&diags,
+		newAttributeRetriever(obj, cty.GetAttrPath("ec2_metadata_service_endpoint_mode")),
+		newEnvvarRetriever("AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE"),
+	); ok {
+		cfg.EC2MetadataServiceEndpointMode = v
 	}
 
 	if val, ok := stringAttrOk(obj, "shared_credentials_file"); ok {
@@ -614,6 +1070,13 @@ func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 	}
 
 	if v, ok := retrieveArgument(&diags,
+		newAttributeRetriever(obj, cty.GetAttrPath("custom_ca_bundle")),
+		newEnvvarRetriever("AWS_CA_BUNDLE"),
+	); ok {
+		cfg.CustomCABundle = v
+	}
+
+	if v, ok := retrieveArgument(&diags,
 		newAttributeRetriever(obj, cty.GetAttrPath("endpoints").GetAttr("iam")),
 		newAttributeRetriever(obj, cty.GetAttrPath("iam_endpoint")),
 		newEnvvarRetriever("AWS_ENDPOINT_URL_IAM"),
@@ -623,12 +1086,23 @@ func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 	}
 
 	if v, ok := retrieveArgument(&diags,
+		newAttributeRetriever(obj, cty.GetAttrPath("endpoints").GetAttr("sso")),
+		newEnvvarRetriever("AWS_ENDPOINT_URL_SSO"),
+	); ok {
+		cfg.SsoEndpoint = v
+	}
+
+	if v, ok := retrieveArgument(&diags,
 		newAttributeRetriever(obj, cty.GetAttrPath("endpoints").GetAttr("sts")),
 		newAttributeRetriever(obj, cty.GetAttrPath("sts_endpoint")),
 		newEnvvarRetriever("AWS_ENDPOINT_URL_STS"),
 		newEnvvarRetriever("AWS_STS_ENDPOINT"),
 	); ok {
 		cfg.StsEndpoint = v
+	}
+
+	if v, ok := retrieveArgument(&diags, newAttributeRetriever(obj, cty.GetAttrPath("sts_region"))); ok {
+		cfg.StsRegion = v
 	}
 
 	if assumeRole := obj.GetAttr("assume_role"); !assumeRole.IsNull() {
@@ -651,6 +1125,9 @@ func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 		}
 		if val, ok := stringAttrOk(assumeRole, "session_name"); ok {
 			ar.SessionName = val
+		}
+		if val, ok := stringAttrOk(assumeRole, "source_identity"); ok {
+			ar.SourceIdentity = val
 		}
 		if val, ok := stringMapAttrOk(assumeRole, "tags"); ok {
 			ar.Tags = val
@@ -709,25 +1186,74 @@ func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 		cfg.AssumeRoleWithWebIdentity = ar
 	}
 
+	if v, ok := retrieveArgument(&diags,
+		newAttributeRetriever(obj, cty.GetAttrPath("http_proxy")),
+	); ok {
+		cfg.HTTPProxy = aws.String(v)
+	}
+	if v, ok := retrieveArgument(&diags,
+		newAttributeRetriever(obj, cty.GetAttrPath("https_proxy")),
+	); ok {
+		cfg.HTTPSProxy = aws.String(v)
+	}
+	if val, ok := stringAttrOk(obj, "no_proxy"); ok {
+		cfg.NoProxy = val
+	}
+
+	if val, ok := boolAttrOk(obj, "insecure"); ok {
+		cfg.Insecure = val
+	}
+	if val, ok := boolAttrDefaultEnvVarOk(obj, "use_fips_endpoint", "AWS_USE_FIPS_ENDPOINT"); ok {
+		cfg.UseFIPSEndpoint = val
+	}
+	if val, ok := boolAttrDefaultEnvVarOk(obj, "use_dualstack_endpoint", "AWS_USE_DUALSTACK_ENDPOINT"); ok {
+		cfg.UseDualStackEndpoint = val
+	}
+
+	if v, ok := retrieveArgument(&diags,
+		newAttributeRetriever(obj, cty.GetAttrPath("retry_mode")),
+		newEnvvarRetriever("AWS_RETRY_MODE"),
+	); ok {
+		cfg.RetryMode = aws.RetryMode(v)
+	}
+
+	if val, ok := stringSetAttrOk(obj, "allowed_account_ids"); ok {
+		cfg.AllowedAccountIds = val
+	}
+	if val, ok := stringSetAttrOk(obj, "forbidden_account_ids"); ok {
+		cfg.ForbiddenAccountIds = val
+	}
+
 	_ /* ctx */, awsConfig, cfgDiags := awsbase.GetAwsConfig(ctx, cfg)
-	for _, diag := range cfgDiags {
-		var severity tfdiags.Severity
-		switch diag.Severity() {
-		case basediag.SeverityError:
-			severity = tfdiags.Error
-		case basediag.SeverityWarning:
-			severity = tfdiags.Warning
-		}
+	for _, d := range cfgDiags {
 		diags = diags.Append(tfdiags.Sourceless(
-			severity,
-			diag.Summary(),
-			diag.Detail(),
+			baseSeverityToTerraformSeverity(d.Severity()),
+			d.Summary(),
+			d.Detail(),
 		))
 	}
 	if diags.HasErrors() {
 		return diags
 	}
 	b.awsConfig = awsConfig
+
+	accountID, _, awsDiags := awsbase.GetAwsAccountIDAndPartition(ctx, awsConfig, cfg)
+	for _, d := range awsDiags {
+		diags = append(diags, tfdiags.Sourceless(
+			baseSeverityToTerraformSeverity(d.Severity()),
+			fmt.Sprintf("Retrieving AWS account details: %s", d.Summary()),
+			d.Detail(),
+		))
+	}
+
+	err := cfg.VerifyAccountIDAllowed(accountID)
+	if err != nil {
+		diags = append(diags, tfdiags.Sourceless(
+			tfdiags.Error,
+			"Invalid account ID",
+			err.Error(),
+		))
+	}
 
 	b.dynClient = dynamodb.NewFromConfig(awsConfig, func(opts *dynamodb.Options) {
 		if v, ok := retrieveArgument(&diags,
@@ -740,19 +1266,23 @@ func (b *Backend) Configure(obj cty.Value) tfdiags.Diagnostics {
 		}
 	})
 
-	b.s3Client = s3.NewFromConfig(awsConfig, func(opts *s3.Options) {
-		if v, ok := retrieveArgument(&diags,
-			newAttributeRetriever(obj, cty.GetAttrPath("endpoints").GetAttr("s3")),
-			newAttributeRetriever(obj, cty.GetAttrPath("endpoint")),
-			newEnvvarRetriever("AWS_ENDPOINT_URL_S3"),
-			newEnvvarRetriever("AWS_S3_ENDPOINT"),
-		); ok {
-			opts.EndpointResolver = s3.EndpointResolverFromURL(v) //nolint:staticcheck // The replacement is not documented yet (2023/08/03)
-		}
-		if v, ok := boolAttrOk(obj, "force_path_style"); ok {
-			opts.UsePathStyle = v
-		}
-	})
+	b.s3Client = s3.NewFromConfig(awsConfig, s3.WithAPIOptions(addS3WrongRegionErrorMiddleware),
+		func(opts *s3.Options) {
+			if v, ok := retrieveArgument(&diags,
+				newAttributeRetriever(obj, cty.GetAttrPath("endpoints").GetAttr("s3")),
+				newAttributeRetriever(obj, cty.GetAttrPath("endpoint")),
+				newEnvvarRetriever("AWS_ENDPOINT_URL_S3"),
+				newEnvvarRetriever("AWS_S3_ENDPOINT"),
+			); ok {
+				opts.EndpointResolver = s3.EndpointResolverFromURL(v) //nolint:staticcheck // The replacement is not documented yet (2023/08/03)
+			}
+			if v, ok := boolAttrOk(obj, "force_path_style"); ok { // deprecated
+				opts.UsePathStyle = v
+			}
+			if v, ok := boolAttrOk(obj, "use_path_style"); ok {
+				opts.UsePathStyle = v
+			}
+		})
 
 	return diags
 }
@@ -940,6 +1470,22 @@ func boolAttrOk(obj cty.Value, name string) (bool, bool) {
 	}
 }
 
+// boolAttrDefaultEnvVarOk checks for a configured bool argument or a non-empty
+// value in any of the provided environment variables. If any of the environment
+// variables are non-empty, to boolean is considered true.
+func boolAttrDefaultEnvVarOk(obj cty.Value, name string, envvars ...string) (bool, bool) {
+	if val := obj.GetAttr(name); val.IsNull() {
+		for _, envvar := range envvars {
+			if v := os.Getenv(envvar); v != "" {
+				return true, true
+			}
+		}
+		return false, false
+	} else {
+		return val.True(), true
+	}
+}
+
 func intAttr(obj cty.Value, name string) int {
 	v, _ := intAttrOk(obj, name)
 	return v
@@ -971,18 +1517,25 @@ The "kms_key_id" is used for encryption with KMS-Managed Keys (SSE-KMS)
 while "AWS_SSE_CUSTOMER_KEY" is used for encryption with customer-managed keys (SSE-C).
 Please choose one or the other.`
 
-func prepareAssumeRoleConfig(obj cty.Value, objPath cty.Path) tfdiags.Diagnostics {
-	var diags tfdiags.Diagnostics
+func validateNestedAttribute(objSchema schemaAttribute, obj cty.Value, objPath cty.Path, diags *tfdiags.Diagnostics) {
 	if obj.IsNull() {
-		return diags
+		return
 	}
 
-	for name, attrSchema := range assumeRoleFullSchema() {
+	na, ok := objSchema.(singleNestedAttribute)
+	if !ok {
+		return
+	}
+
+	validator := objSchema.Validator()
+	validator.ValidateAttr(obj, objPath, diags)
+
+	for name, attrSchema := range na.Attributes {
 		attrPath := objPath.GetAttr(name)
 		attrVal := obj.GetAttr(name)
 
 		if a, e := attrVal.Type(), attrSchema.SchemaAttribute().Type; a != e {
-			diags = diags.Append(attributeErrDiag(
+			*diags = diags.Append(attributeErrDiag(
 				"Internal Error",
 				fmt.Sprintf(`Expected type to be %s, got: %s`, e.FriendlyName(), a.FriendlyName()),
 				attrPath,
@@ -992,53 +1545,14 @@ func prepareAssumeRoleConfig(obj cty.Value, objPath cty.Path) tfdiags.Diagnostic
 
 		if attrVal.IsNull() {
 			if attrSchema.SchemaAttribute().Required {
-				diags = diags.Append(requiredAttributeErrDiag(attrPath))
+				*diags = diags.Append(requiredAttributeErrDiag(attrPath))
 			}
 			continue
 		}
 
 		validator := attrSchema.Validator()
-		validator.ValidateAttr(attrVal, attrPath, &diags)
+		validator.ValidateAttr(attrVal, attrPath, diags)
 	}
-
-	return diags
-}
-func prepareAssumeRoleWithWebIdentityConfig(obj cty.Value, objPath cty.Path) tfdiags.Diagnostics {
-	var diags tfdiags.Diagnostics
-	if obj.IsNull() {
-		return diags
-	}
-
-	for name, attrSchema := range assumeRoleWithWebIdentityFullSchema() {
-		attrPath := objPath.GetAttr(name)
-		attrVal := obj.GetAttr(name)
-
-		if a, e := attrVal.Type(), attrSchema.SchemaAttribute().Type; a != e {
-			diags = diags.Append(attributeErrDiag(
-				"Internal Error",
-				fmt.Sprintf(`Expected type to be %s, got: %s`, e.FriendlyName(), a.FriendlyName()),
-				attrPath,
-			))
-			continue
-		}
-
-		if attrVal.IsNull() {
-			if attrSchema.SchemaAttribute().Required {
-				diags = diags.Append(requiredAttributeErrDiag(attrPath))
-			}
-			continue
-		}
-
-		validator := attrSchema.Validator()
-		validator.ValidateAttr(attrVal, attrPath, &diags)
-	}
-
-	validateExactlyOneOfAttributes(
-		cty.GetAttrPath("web_identity_token"),
-		cty.GetAttrPath("web_identity_token_file"),
-	)(obj, objPath, &diags)
-
-	return diags
 }
 
 func requiredAttributeErrDiag(path cty.Path) tfdiags.Diagnostic {
@@ -1118,10 +1632,22 @@ func (v validateSet) ValidateAttr(val cty.Value, attrPath cty.Path, diags *tfdia
 	}
 }
 
+type validateObject struct {
+	Validators []objectValidator
+}
+
+func (v validateObject) ValidateAttr(val cty.Value, attrPath cty.Path, diags *tfdiags.Diagnostics) {
+	for _, validator := range v.Validators {
+		validator(val, attrPath, diags)
+	}
+}
+
 type schemaAttribute interface {
 	SchemaAttribute() *configschema.Attribute
 	Validator() validateSchema
 }
+
+var _ schemaAttribute = stringAttribute{}
 
 type stringAttribute struct {
 	configschema.Attribute
@@ -1136,6 +1662,8 @@ func (a stringAttribute) Validator() validateSchema {
 	return a.validateString
 }
 
+var _ schemaAttribute = setAttribute{}
+
 type setAttribute struct {
 	configschema.Attribute
 	validateSet
@@ -1148,6 +1676,8 @@ func (a setAttribute) SchemaAttribute() *configschema.Attribute {
 func (a setAttribute) Validator() validateSchema {
 	return a.validateSet
 }
+
+var _ schemaAttribute = mapAttribute{}
 
 type mapAttribute struct {
 	configschema.Attribute
@@ -1172,239 +1702,27 @@ func (s objectSchema) SchemaAttributes() map[string]*configschema.Attribute {
 	return m
 }
 
-func assumeRoleFullSchema() objectSchema {
-	return map[string]schemaAttribute{
-		"role_arn": stringAttribute{
-			configschema.Attribute{
-				Type:        cty.String,
-				Required:    true,
-				Description: "The role to be assumed.",
-			},
-			validateString{
-				Validators: []stringValidator{
-					validateARN(
-						validateIAMRoleARN,
-					),
-				},
-			},
-		},
+var _ schemaAttribute = singleNestedAttribute{}
 
-		"duration": stringAttribute{
-			configschema.Attribute{
-				Type:        cty.String,
-				Optional:    true,
-				Description: "The duration, between 15 minutes and 12 hours, of the role session. Valid time units are ns, us (or µs), ms, s, h, or m.",
-			},
-			validateString{
-				Validators: []stringValidator{
-					validateDuration(
-						validateDurationBetween(15*time.Minute, 12*time.Hour),
-					),
-				},
-			},
-		},
+type singleNestedAttribute struct {
+	Attributes objectSchema
+	Required   bool
+	validateObject
+}
 
-		"external_id": stringAttribute{
-			configschema.Attribute{
-				Type:        cty.String,
-				Optional:    true,
-				Description: "The external ID to use when assuming the role",
-			},
-			validateString{
-				Validators: []stringValidator{
-					validateStringLenBetween(2, 1224),
-					validateStringMatches(
-						regexp.MustCompile(`^[\w+=,.@:\/\-]*$`),
-						`Value can only contain letters, numbers, or the following characters: =,.@/-`,
-					),
-				},
-			},
+func (a singleNestedAttribute) SchemaAttribute() *configschema.Attribute {
+	return &configschema.Attribute{
+		NestedType: &configschema.Object{
+			Nesting:    configschema.NestingSingle,
+			Attributes: a.Attributes.SchemaAttributes(),
 		},
-
-		"policy": stringAttribute{
-			configschema.Attribute{
-				Type:        cty.String,
-				Optional:    true,
-				Description: "IAM Policy JSON describing further restricting permissions for the IAM Role being assumed.",
-			},
-			validateString{
-				Validators: []stringValidator{
-					validateStringNotEmpty,
-					validateIAMPolicyDocument,
-				},
-			},
-		},
-
-		"policy_arns": setAttribute{
-			configschema.Attribute{
-				Type:        cty.Set(cty.String),
-				Optional:    true,
-				Description: "Amazon Resource Names (ARNs) of IAM Policies describing further restricting permissions for the IAM Role being assumed.",
-			},
-			validateSet{
-				Validators: []setValidator{
-					validateSetStringElements(
-						validateARN(
-							validateIAMPolicyARN,
-						),
-					),
-				},
-			},
-		},
-
-		"session_name": stringAttribute{
-			configschema.Attribute{
-				Type:        cty.String,
-				Optional:    true,
-				Description: "The session name to use when assuming the role.",
-			},
-			validateString{
-				Validators: []stringValidator{
-					validateStringLenBetween(2, 64),
-					validateStringMatches(
-						regexp.MustCompile(`^[\w+=,.@\-]*$`),
-						`Value can only contain letters, numbers, or the following characters: =,.@-`,
-					),
-				},
-			},
-		},
-
-		// NOT SUPPORTED by `aws-sdk-go-base/v1`
-		// "source_identity": stringAttribute{
-		// 	configschema.Attribute{
-		// 		Type:         cty.String,
-		// 		Optional:     true,
-		// 		Description:  "Source identity specified by the principal assuming the role.",
-		// 		ValidateFunc: validAssumeRoleSourceIdentity,
-		// 	},
-		// },
-
-		"tags": mapAttribute{
-			configschema.Attribute{
-				Type:        cty.Map(cty.String),
-				Optional:    true,
-				Description: "Assume role session tags.",
-			},
-			validateMap{},
-		},
-
-		"transitive_tag_keys": setAttribute{
-			configschema.Attribute{
-				Type:        cty.Set(cty.String),
-				Optional:    true,
-				Description: "Assume role session tag keys to pass to any subsequent sessions.",
-			},
-			validateSet{},
-		},
+		Required: a.Required,
+		Optional: !a.Required,
 	}
 }
 
-func assumeRoleWithWebIdentityFullSchema() objectSchema {
-	return map[string]schemaAttribute{
-		"role_arn": stringAttribute{
-			configschema.Attribute{
-				Type:        cty.String,
-				Required:    true,
-				Description: "The role to be assumed.",
-			},
-			validateString{
-				Validators: []stringValidator{
-					validateARN(
-						validateIAMRoleARN,
-					),
-				},
-			},
-		},
-
-		"duration": stringAttribute{
-			configschema.Attribute{
-				Type:        cty.String,
-				Optional:    true,
-				Description: "The duration, between 15 minutes and 12 hours, of the role session. Valid time units are ns, us (or µs), ms, s, h, or m.",
-			},
-			validateString{
-				Validators: []stringValidator{
-					validateDuration(
-						validateDurationBetween(15*time.Minute, 12*time.Hour),
-					),
-				},
-			},
-		},
-
-		"policy": stringAttribute{
-			configschema.Attribute{
-				Type:        cty.String,
-				Optional:    true,
-				Description: "IAM Policy JSON describing further restricting permissions for the IAM Role being assumed.",
-			},
-			validateString{
-				Validators: []stringValidator{
-					validateStringNotEmpty,
-					validateIAMPolicyDocument,
-				},
-			},
-		},
-
-		"policy_arns": setAttribute{
-			configschema.Attribute{
-				Type:        cty.Set(cty.String),
-				Optional:    true,
-				Description: "Amazon Resource Names (ARNs) of IAM Policies describing further restricting permissions for the IAM Role being assumed.",
-			},
-			validateSet{
-				Validators: []setValidator{
-					validateSetStringElements(
-						validateARN(
-							validateIAMPolicyARN,
-						),
-					),
-				},
-			},
-		},
-
-		"session_name": stringAttribute{
-			configschema.Attribute{
-				Type:        cty.String,
-				Optional:    true,
-				Description: "The session name to use when assuming the role.",
-			},
-			validateString{
-				Validators: []stringValidator{
-					validateStringLenBetween(2, 64),
-					validateStringMatches(
-						regexp.MustCompile(`^[\w+=,.@\-]*$`),
-						`Value can only contain letters, numbers, or the following characters: =,.@-`,
-					),
-				},
-			},
-		},
-
-		"web_identity_token": stringAttribute{
-			configschema.Attribute{
-				Type:        cty.String,
-				Optional:    true,
-				Description: "Value of a web identity token from an OpenID Connect (OIDC) or OAuth provider.",
-			},
-			validateString{
-				Validators: []stringValidator{
-					validateStringLenBetween(4, 20000),
-				},
-			},
-		},
-
-		"web_identity_token_file": stringAttribute{
-			configschema.Attribute{
-				Type:        cty.String,
-				Optional:    true,
-				Description: "File containing a web identity token from an OpenID Connect (OIDC) or OAuth provider.",
-			},
-			validateString{
-				Validators: []stringValidator{
-					validateStringLenBetween(4, 20000),
-				},
-			},
-		},
-	}
+func (a singleNestedAttribute) Validator() validateSchema {
+	return a.validateObject
 }
 
 func deprecatedAttrDiag(attr, replacement cty.Path) tfdiags.Diagnostic {

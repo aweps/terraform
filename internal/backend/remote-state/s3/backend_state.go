@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
+	baselogging "github.com/hashicorp/aws-sdk-go-base/v2/logging"
 	"github.com/hashicorp/terraform/internal/backend"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/states/remote"
@@ -25,6 +26,11 @@ func (b *Backend) Workspaces() ([]string, error) {
 	const maxKeys = 1000
 
 	ctx := context.TODO()
+	log := logger()
+	log = logWithOperation(log, operationBackendWorkspaces)
+	log = log.With(
+		logKeyBucket, b.bucketName,
+	)
 
 	prefix := ""
 
@@ -32,22 +38,29 @@ func (b *Backend) Workspaces() ([]string, error) {
 		prefix = b.workspaceKeyPrefix + "/"
 	}
 
+	log = log.With(
+		logKeyBackendWorkspacePrefix, prefix,
+	)
+
 	params := &s3.ListObjectsV2Input{
 		Bucket:  aws.String(b.bucketName),
 		Prefix:  aws.String(prefix),
-		MaxKeys: maxKeys,
+		MaxKeys: aws.Int32(maxKeys),
 	}
 
 	wss := []string{backend.DefaultStateName}
+
+	ctx, baselog := baselogging.NewHcLogger(ctx, log)
+	ctx = baselogging.RegisterLogger(ctx, baselog)
 
 	pages := s3.NewListObjectsV2Paginator(b.s3Client, params)
 	for pages.HasMorePages() {
 		page, err := pages.NextPage(ctx)
 		if err != nil {
 			if IsA[*s3types.NoSuchBucket](err) {
-				return nil, fmt.Errorf(errS3NoSuchBucket, err)
+				return nil, fmt.Errorf(errS3NoSuchBucket, b.bucketName, err)
 			}
-			return nil, err
+			return nil, fmt.Errorf("Unable to list objects in S3 bucket %q: %w", b.bucketName, err)
 		}
 
 		for _, obj := range page.Contents {
@@ -102,9 +115,17 @@ func (b *Backend) keyEnv(key string) string {
 }
 
 func (b *Backend) DeleteWorkspace(name string, _ bool) error {
+	log := logger()
+	log = logWithOperation(log, operationBackendDeleteWorkspace)
+	log = log.With(
+		logKeyBackendWorkspace, name,
+	)
+
 	if name == backend.DefaultStateName || name == "" {
 		return fmt.Errorf("can't delete default state")
 	}
+
+	log.Info("Deleting workspace")
 
 	client, err := b.remoteClient(name)
 	if err != nil {
@@ -130,6 +151,7 @@ func (b *Backend) remoteClient(name string) (*RemoteClient, error) {
 		acl:                   b.acl,
 		kmsKeyID:              b.kmsKeyID,
 		ddbTable:              b.ddbTable,
+		skipS3Checksum:        b.skipS3Checksum,
 	}
 
 	return client, nil
@@ -226,3 +248,20 @@ Error: %s
 
 You may have to force-unlock this state in order to use it again.
 `
+
+var _ error = bucketRegionError{}
+
+type bucketRegionError struct {
+	requestRegion, bucketRegion string
+}
+
+func newBucketRegionError(requestRegion, bucketRegion string) bucketRegionError {
+	return bucketRegionError{
+		requestRegion: requestRegion,
+		bucketRegion:  bucketRegion,
+	}
+}
+
+func (err bucketRegionError) Error() string {
+	return fmt.Sprintf("requested bucket from %q, actual location %q", err.requestRegion, err.bucketRegion)
+}

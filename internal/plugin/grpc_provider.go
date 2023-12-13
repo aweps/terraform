@@ -73,14 +73,18 @@ type GRPCProvider struct {
 	schema providers.GetProviderSchemaResponse
 }
 
-func (p *GRPCProvider) GetProviderSchema() (resp providers.GetProviderSchemaResponse) {
+func (p *GRPCProvider) GetProviderSchema() providers.GetProviderSchemaResponse {
 	logger.Trace("GRPCProvider: GetProviderSchema")
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	// check the global cache if we can
-	if !p.Addr.IsZero() && resp.ServerCapabilities.GetProviderSchemaOptional {
-		if resp, ok := providers.SchemaCache.Get(p.Addr); ok {
+	// FIXME: A global cache is inappropriate when Terraform Core is being
+	// used in a non-Terraform-CLI mode where we shouldn't assume that all
+	// calls share the same provider implementations.
+	if !p.Addr.IsZero() {
+		if resp, ok := providers.SchemaCache.Get(p.Addr); ok && resp.ServerCapabilities.GetProviderSchemaOptional {
+			logger.Trace("GRPCProvider: returning cached schema", p.Addr.String())
 			return resp
 		}
 	}
@@ -90,6 +94,8 @@ func (p *GRPCProvider) GetProviderSchema() (resp providers.GetProviderSchemaResp
 	if p.schema.Provider.Block != nil {
 		return p.schema
 	}
+
+	var resp providers.GetProviderSchemaResponse
 
 	resp.ResourceTypes = make(map[string]providers.Schema)
 	resp.DataSources = make(map[string]providers.Schema)
@@ -141,6 +147,9 @@ func (p *GRPCProvider) GetProviderSchema() (resp providers.GetProviderSchemaResp
 	}
 
 	// set the global cache if we can
+	// FIXME: A global cache is inappropriate when Terraform Core is being
+	// used in a non-Terraform-CLI mode where we shouldn't assume that all
+	// calls share the same provider implementations.
 	if !p.Addr.IsZero() {
 		providers.SchemaCache.Set(p.Addr, resp)
 	}

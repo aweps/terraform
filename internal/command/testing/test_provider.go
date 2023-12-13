@@ -33,9 +33,12 @@ var (
 			"test_resource": {
 				Block: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
-						"id":              {Type: cty.String, Optional: true, Computed: true},
-						"value":           {Type: cty.String, Optional: true},
-						"interrupt_count": {Type: cty.Number, Optional: true},
+						"id":                   {Type: cty.String, Optional: true, Computed: true},
+						"value":                {Type: cty.String, Optional: true},
+						"interrupt_count":      {Type: cty.Number, Optional: true},
+						"destroy_fail":         {Type: cty.Bool, Optional: true, Computed: true},
+						"create_wait_seconds":  {Type: cty.Number, Optional: true},
+						"destroy_wait_seconds": {Type: cty.Number, Optional: true},
 					},
 				},
 			},
@@ -44,9 +47,18 @@ var (
 			"test_data_source": {
 				Block: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
-						"id":              {Type: cty.String, Required: true},
-						"value":           {Type: cty.String, Computed: true},
-						"interrupt_count": {Type: cty.Number, Computed: true},
+						"id":    {Type: cty.String, Required: true},
+						"value": {Type: cty.String, Computed: true},
+
+						// We never actually reference these values from a data
+						// source, but we have tests that use the same cty.Value
+						// to represent a test_resource and a test_data_source
+						// so the schemas have to match.
+
+						"interrupt_count":      {Type: cty.Number, Computed: true},
+						"destroy_fail":         {Type: cty.Bool, Computed: true},
+						"create_wait_seconds":  {Type: cty.Number, Computed: true},
+						"destroy_wait_seconds": {Type: cty.Number, Computed: true},
 					},
 				},
 			},
@@ -193,6 +205,12 @@ func (provider *TestProvider) PlanResourceChange(request providers.PlanResourceC
 		resource = cty.ObjectVal(vals)
 	}
 
+	if destryFail := resource.GetAttr("destroy_fail"); !destryFail.IsKnown() || destryFail.IsNull() {
+		vals := resource.AsValueMap()
+		vals["destroy_fail"] = cty.UnknownVal(cty.Bool)
+		resource = cty.ObjectVal(vals)
+	}
+
 	return providers.PlanResourceChangeResponse{
 		PlannedState: resource,
 	}
@@ -201,6 +219,20 @@ func (provider *TestProvider) PlanResourceChange(request providers.PlanResourceC
 func (provider *TestProvider) ApplyResourceChange(request providers.ApplyResourceChangeRequest) providers.ApplyResourceChangeResponse {
 	if request.PlannedState.IsNull() {
 		// Then this is a delete operation.
+
+		if destroyFail := request.PriorState.GetAttr("destroy_fail"); destroyFail.IsKnown() && destroyFail.True() {
+			var diags tfdiags.Diagnostics
+			diags = diags.Append(tfdiags.Sourceless(tfdiags.Error, "Failed to destroy resource", "destroy_fail is set to true"))
+			return providers.ApplyResourceChangeResponse{
+				Diagnostics: diags,
+			}
+		}
+
+		if wait := request.PriorState.GetAttr("destroy_wait_seconds"); !wait.IsNull() && wait.IsKnown() {
+			waitTime, _ := wait.AsBigFloat().Int64()
+			time.Sleep(time.Second * time.Duration(waitTime))
+		}
+
 		provider.Store.Delete(provider.GetResourceKey(request.PriorState.GetAttr("id").AsString()))
 		return providers.ApplyResourceChangeResponse{
 			NewState: request.PlannedState,
@@ -222,8 +254,7 @@ func (provider *TestProvider) ApplyResourceChange(request providers.ApplyResourc
 		resource = cty.ObjectVal(vals)
 	}
 
-	interrupts := resource.GetAttr("interrupt_count")
-	if !interrupts.IsNull() && interrupts.IsKnown() && provider.Interrupt != nil {
+	if interrupts := resource.GetAttr("interrupt_count"); !interrupts.IsNull() && interrupts.IsKnown() && provider.Interrupt != nil {
 		count, _ := interrupts.AsBigFloat().Int64()
 		for ix := 0; ix < int(count); ix++ {
 			provider.Interrupt <- struct{}{}
@@ -233,6 +264,17 @@ func (provider *TestProvider) ApplyResourceChange(request providers.ApplyResourc
 		// Terraform before the provider finishes. This is an attempt to ensure
 		// the output of any tests that rely on this behaviour is deterministic.
 		time.Sleep(time.Second)
+	}
+
+	if wait := resource.GetAttr("create_wait_seconds"); !wait.IsNull() && wait.IsKnown() {
+		waitTime, _ := wait.AsBigFloat().Int64()
+		time.Sleep(time.Second * time.Duration(waitTime))
+	}
+
+	if destroyFail := resource.GetAttr("destroy_fail"); !destroyFail.IsKnown() {
+		vals := resource.AsValueMap()
+		vals["destroy_fail"] = cty.False
+		resource = cty.ObjectVal(vals)
 	}
 
 	provider.Store.Put(provider.GetResourceKey(id.AsString()), resource)
