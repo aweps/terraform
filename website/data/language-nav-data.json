@@ -11,10 +11,8 @@
     "routes": [
       { "title": "Overview", "path": "files" },
       { "title": "Override Files", "path": "files/override" },
-      {
-        "title": "Dependency Lock File",
-        "path": "files/dependency-lock"
-      }
+      { "title": "Dependency Lock File", "path": "files/dependency-lock" },
+      { "title": "Test Files", "path": "files/tests" }
     ]
   },
   {
@@ -213,11 +211,6 @@
             "path": "modules/develop/refactoring"
           }
         ]
-      },
-      {
-        "title": "Module Testing Experiment",
-        "path": "modules/testing-experiment",
-        "hidden": true
       }
     ]
   },
@@ -1060,7 +1053,20 @@
     ]
   },
   {
-    "title": "Upgrading to Terraform v1.5",
+    "title": "Tests",
+    "routes": [
+      {
+        "title": "Overview",
+        "path": "tests"
+      },
+      {
+        "title": "Mocks",
+        "path": "tests/mocking"
+      }
+    ]
+  },
+  {
+    "title": "Upgrading to Terraform v1.6",
     "path": "upgrade-guides"
   },
   {

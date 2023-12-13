@@ -29,6 +29,10 @@ type NodeRootVariable struct {
 	// Planning must be set to true when building a planning graph, and must be
 	// false when building an apply graph.
 	Planning bool
+
+	// DestroyApply must be set to true when applying a destroy operation and
+	// false otherwise.
+	DestroyApply bool
 }
 
 var (
@@ -107,15 +111,17 @@ func (n *NodeRootVariable) Execute(ctx EvalContext, op walkOperation) tfdiags.Di
 		return diags
 	}
 
-	ctx.SetRootModuleArgument(addr.Variable, finalVal)
+	ctx.NamedValues().SetInputVariableValue(addr, finalVal)
 
-	moreDiags = evalVariableValidations(
-		addrs.RootModuleInstance.InputVariable(n.Addr.Name),
-		n.Config,
-		nil, // not set for root module variables
-		ctx,
-	)
-	diags = diags.Append(moreDiags)
+	if !n.DestroyApply {
+		diags = diags.Append(evalVariableValidations(
+			addrs.RootModuleInstance.InputVariable(n.Addr.Name),
+			n.Config,
+			nil, // not set for root module variables
+			ctx,
+		))
+	}
+
 	return diags
 }
 

@@ -87,6 +87,7 @@ type NodeAbstractResource struct {
 var (
 	_ GraphNodeReferenceable               = (*NodeAbstractResource)(nil)
 	_ GraphNodeReferencer                  = (*NodeAbstractResource)(nil)
+	_ GraphNodeImportReferencer            = (*NodeAbstractResource)(nil)
 	_ GraphNodeProviderConsumer            = (*NodeAbstractResource)(nil)
 	_ GraphNodeProvisionerConsumer         = (*NodeAbstractResource)(nil)
 	_ GraphNodeConfigResource              = (*NodeAbstractResource)(nil)
@@ -121,6 +122,7 @@ var (
 	_ GraphNodeAttachProvisionerSchema   = (*NodeAbstractResourceInstance)(nil)
 	_ GraphNodeAttachProviderMetaConfigs = (*NodeAbstractResourceInstance)(nil)
 	_ GraphNodeTargetable                = (*NodeAbstractResourceInstance)(nil)
+	_ GraphNodeOverridable               = (*NodeAbstractResourceInstance)(nil)
 	_ dag.GraphNodeDotter                = (*NodeAbstractResourceInstance)(nil)
 )
 
@@ -205,11 +207,22 @@ func (n *NodeAbstractResource) References() []*addrs.Reference {
 		}
 	}
 
+	return result
+}
+
+func (n *NodeAbstractResource) ImportReferences() []*addrs.Reference {
+	var result []*addrs.Reference
 	for _, importTarget := range n.importTargets {
-		refs, _ := lang.ReferencesInExpr(addrs.ParseRef, importTarget.ID)
+		// legacy import won't have any config
+		if importTarget.Config == nil {
+			continue
+		}
+
+		refs, _ := lang.ReferencesInExpr(addrs.ParseRef, importTarget.Config.ID)
+		result = append(result, refs...)
+		refs, _ = lang.ReferencesInExpr(addrs.ParseRef, importTarget.Config.ForEach)
 		result = append(result, refs...)
 	}
-
 	return result
 }
 
@@ -432,7 +445,7 @@ func (n *NodeAbstractResource) readResourceInstanceState(ctx EvalContext, addr a
 
 	log.Printf("[TRACE] readResourceInstanceState: reading state for %s", addr)
 
-	src := ctx.State().ResourceInstanceObject(addr, states.CurrentGen)
+	src := ctx.State().ResourceInstanceObject(addr, addrs.NotDeposed)
 	if src == nil {
 		// Presumably we only have deposed objects, then.
 		log.Printf("[TRACE] readResourceInstanceState: no state present for %s", addr)

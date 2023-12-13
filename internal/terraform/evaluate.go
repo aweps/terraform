@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/hashicorp/hcl/v2"
@@ -21,6 +20,7 @@ import (
 	"github.com/hashicorp/terraform/internal/instances"
 	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/lang/marks"
+	"github.com/hashicorp/terraform/internal/namedvals"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/tfdiags"
@@ -39,15 +39,9 @@ type Evaluator struct {
 	// Config is the root node in the configuration tree.
 	Config *configs.Config
 
-	// VariableValues is a map from variable names to their associated values,
-	// within the module indicated by ModulePath. VariableValues is modified
-	// concurrently, and so it must be accessed only while holding
-	// VariableValuesLock.
-	//
-	// The first map level is string representations of addr.ModuleInstance
-	// values, while the second level is variable names.
-	VariableValues     map[string]map[string]cty.Value
-	VariableValuesLock *sync.Mutex
+	// NamedValues is where we keep the values of already-evaluated input
+	// variables, local values, and output values.
+	NamedValues *namedvals.State
 
 	// Plugins is the library of available plugin components (providers and
 	// provisioners) that we have available to help us evaluate expressions
@@ -64,13 +58,6 @@ type Evaluator struct {
 	// Changes is the set of proposed changes, embedded in a wrapper that
 	// ensures they can be safely accessed and modified concurrently.
 	Changes *plans.ChangesSync
-
-	// AlternateStates allows callers to reference states from outside this
-	// evaluator.
-	//
-	// The main use case here is for the testing framework to call into other
-	// run blocks.
-	AlternateStates map[string]*evaluationStateData
 
 	PlanTimestamp time.Time
 }
@@ -252,8 +239,6 @@ func (d *evaluationStateData) GetInputVariable(addr addrs.InputVariable, rng tfd
 		})
 		return cty.DynamicVal, diags
 	}
-	d.Evaluator.VariableValuesLock.Lock()
-	defer d.Evaluator.VariableValuesLock.Unlock()
 
 	// During the validate walk, input variables are always unknown so
 	// that we are validating the configuration for all possible input values
@@ -276,36 +261,7 @@ func (d *evaluationStateData) GetInputVariable(addr addrs.InputVariable, rng tfd
 		return cty.UnknownVal(config.Type), diags
 	}
 
-	moduleAddrStr := d.ModulePath.String()
-	vals := d.Evaluator.VariableValues[moduleAddrStr]
-	if vals == nil {
-		return cty.UnknownVal(config.Type), diags
-	}
-
-	// d.Evaluator.VariableValues should always contain valid "final values"
-	// for variables, which is to say that they have already had type
-	// conversions, validations, and default value handling applied to them.
-	// Those are the responsibility of the graph notes representing the
-	// variable declarations. Therefore here we just trust that we already
-	// have a correct value.
-
-	val, isSet := vals[addr.Name]
-	if !isSet {
-		// We should not be able to get here without having a valid value
-		// for every variable, so this always indicates a bug in either
-		// the graph builder (not including all the needed nodes) or in
-		// the graph nodes representing variables.
-		diags = diags.Append(&hcl.Diagnostic{
-			Severity: hcl.DiagError,
-			Summary:  `Reference to unresolved input variable`,
-			Detail: fmt.Sprintf(
-				`The final value for %s is missing in Terraform's evaluation context. This is a bug in Terraform; please report it!`,
-				addr.Absolute(d.ModulePath),
-			),
-			Subject: rng.ToHCL().Ptr(),
-		})
-		val = cty.UnknownVal(config.Type)
-	}
+	val := d.Evaluator.NamedValues.GetInputVariableValue(d.ModulePath.InputVariable(addr.Name))
 
 	// Mark if sensitive
 	if config.Sensitive {
@@ -347,12 +303,7 @@ func (d *evaluationStateData) GetLocalValue(addr addrs.LocalValue, rng tfdiags.S
 		return cty.DynamicVal, diags
 	}
 
-	val := d.Evaluator.State.LocalValue(addr.Absolute(d.ModulePath))
-	if val == cty.NilVal {
-		// Not evaluated yet?
-		val = cty.DynamicVal
-	}
-
+	val := d.Evaluator.NamedValues.GetLocalValue(addr.Absolute(d.ModulePath))
 	return val, diags
 }
 
@@ -390,20 +341,18 @@ func (d *evaluationStateData) GetModule(addr addrs.ModuleCall, rng tfdiags.Sourc
 	// We know the instance path up to this point, and the child module name,
 	// so we only need to store these by instance key.
 	stateMap := map[addrs.InstanceKey]map[string]cty.Value{}
-	for _, output := range d.Evaluator.State.ModuleOutputs(d.ModulePath, addr) {
-		val := output.Value
-		if output.Sensitive {
-			val = val.Mark(marks.Sensitive)
-		}
+	for _, elem := range d.Evaluator.NamedValues.GetOutputValuesForModuleCall(d.ModulePath, addr).Elems {
+		outputAddr := elem.Key
+		val := elem.Value
 
-		_, callInstance := output.Addr.Module.CallInstance()
+		_, callInstance := outputAddr.Module.CallInstance()
 		instance, ok := stateMap[callInstance.Key]
 		if !ok {
 			instance = map[string]cty.Value{}
 			stateMap[callInstance.Key] = instance
 		}
 
-		instance[output.Addr.OutputValue.Name] = val
+		instance[outputAddr.OutputValue.Name] = val
 	}
 
 	// Get all changes that reside for this module call within our path.
@@ -755,7 +704,7 @@ func (d *evaluationStateData) GetResource(addr addrs.Resource, rng tfdiags.Sourc
 
 		instAddr := addr.Instance(key).Absolute(d.ModulePath)
 
-		change := d.Evaluator.Changes.GetResourceInstanceChange(instAddr, states.CurrentGen)
+		change := d.Evaluator.Changes.GetResourceInstanceChange(instAddr, addrs.NotDeposed)
 		if change != nil {
 			// Don't take any resources that are yet to be deleted into account.
 			// If the referenced resource is CreateBeforeDestroy, then orphaned
@@ -981,13 +930,21 @@ func (d *evaluationStateData) GetOutput(addr addrs.OutputValue, rng tfdiags.Sour
 	}
 
 	output := d.Evaluator.State.OutputValue(addr.Absolute(d.ModulePath))
-
-	val := output.Value
-	if val == cty.NilVal {
-		// Not evaluated yet?
-		val = cty.DynamicVal
+	if output == nil {
+		// Then the output itself returned null, so we'll package that up and
+		// pass it on.
+		output = &states.OutputValue{
+			Addr:      addr.Absolute(d.ModulePath),
+			Value:     cty.NilVal,
+			Sensitive: config.Sensitive,
+		}
+	} else if output.Value == cty.NilVal || output.Value.IsNull() {
+		// Then we did get a value but Terraform itself thought it was NilVal
+		// so we treat this as if the value isn't yet known.
+		output.Value = cty.DynamicVal
 	}
 
+	val := output.Value
 	if output.Sensitive {
 		val = val.Mark(marks.Sensitive)
 	}
@@ -1013,30 +970,10 @@ func (d *evaluationStateData) GetCheckBlock(addr addrs.Check, rng tfdiags.Source
 }
 
 func (d *evaluationStateData) GetRunBlock(run addrs.Run, rng tfdiags.SourceRange) (cty.Value, tfdiags.Diagnostics) {
-	var diags tfdiags.Diagnostics
-
-	data, exists := d.Evaluator.AlternateStates[run.Name]
-	if !exists {
-		diags = diags.Append(&hcl.Diagnostic{
-			Severity: hcl.DiagError,
-			Summary:  "Reference to unavailable run block",
-			Detail:   fmt.Sprintf("The current test file either contains no %s, or hasn't executed it yet.", run),
-			Subject:  rng.ToHCL().Ptr(),
-		})
-		return cty.DynamicVal, diags
-	}
-
-	outputs := make(map[string]cty.Value)
-	for _, outputCfg := range data.Evaluator.Config.Module.Outputs {
-		output, outputDiags := data.GetOutput(outputCfg.Addr(), rng)
-		diags = diags.Append(outputDiags)
-		if outputDiags.HasErrors() {
-			continue
-		}
-		outputs[outputCfg.Name] = output
-	}
-
-	return cty.ObjectVal(outputs), diags
+	// We should not get here because any scope that has an [evaluationStateData]
+	// as its Data should have a reference parser that doesn't accept addrs.Run
+	// addresses.
+	panic("GetRunBlock called on non-test evaluation dataset")
 }
 
 // moduleDisplayAddr returns a string describing the given module instance
