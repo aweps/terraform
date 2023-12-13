@@ -16,6 +16,7 @@ import (
 	"github.com/apparentlymart/go-versions/versions"
 	version "github.com/hashicorp/go-version"
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs"
@@ -162,6 +163,13 @@ func (i *ModuleInstaller) moduleInstallWalker(ctx context.Context, manifest mods
 				return nil, nil, diags
 			}
 
+			if !hclsyntax.ValidIdentifier(req.Name) {
+				// A module with an invalid name shouldn't be installed at all. This is
+				// mostly a concern for remote modules, since we need to be able to convert
+				// the name to a valid path.
+				return nil, nil, diags
+			}
+
 			key := manifest.ModuleKey(req.Path)
 			instPath := i.packageInstallPath(req.Path)
 
@@ -303,7 +311,7 @@ func (i *ModuleInstaller) installDescendentModules(rootMod *configs.Module, mani
 		})
 	}
 
-	cfg, cDiags := configs.BuildConfig(rootMod, walker)
+	cfg, cDiags := configs.BuildConfig(rootMod, walker, configs.MockDataLoaderFunc(i.loader.LoadExternalMockData))
 	diags = diags.Append(cDiags)
 	if installErrsOnly {
 		// We can't continue if there was an error during installation, but

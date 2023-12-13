@@ -260,7 +260,6 @@ func prepareStateV4(sV4 *stateV4) (*File, tfdiags.Diagnostics) {
 	// need to reload them now. (For descendent modules we just re-calculate
 	// them based on the latest configuration on each run.)
 	{
-		rootModule := state.RootModule()
 		for name, fos := range sV4.RootOutputs {
 			os := &states.OutputValue{
 				Addr: addrs.AbsOutputValue{
@@ -292,7 +291,7 @@ func prepareStateV4(sV4 *stateV4) (*File, tfdiags.Diagnostics) {
 			}
 
 			os.Value = val
-			rootModule.OutputValues[name] = os
+			state.RootOutputValues[name] = os
 		}
 	}
 
@@ -338,7 +337,7 @@ func writeStateV4(file *File, w io.Writer) tfdiags.Diagnostics {
 		Resources:        []resourceStateV4{},
 	}
 
-	for name, os := range file.State.RootModule().OutputValues {
+	for name, os := range file.State.RootOutputValues {
 		src, err := ctyjson.Marshal(os.Value, os.Value.Type())
 		if err != nil {
 			diags = diags.Append(tfdiags.Sourceless(
@@ -525,7 +524,11 @@ func decodeCheckResultsV4(in []checkResultsV4) (*states.CheckResults, tfdiags.Di
 	for _, aggrIn := range in {
 		objectKind := decodeCheckableObjectKindV4(aggrIn.ObjectKind)
 		if objectKind == addrs.CheckableKindInvalid {
-			diags = diags.Append(fmt.Errorf("unsupported checkable object kind %q", aggrIn.ObjectKind))
+			// We cannot decode a future unknown check result kind, but
+			// for forwards compatibility we need not treat this as an
+			// error. Eliding unknown check results will not result in
+			// significant data loss and allows us to maintain state file
+			// interoperability in the 1.x series.
 			continue
 		}
 

@@ -49,8 +49,9 @@ type Module struct {
 	ManagedResources map[string]*Resource
 	DataResources    map[string]*Resource
 
-	Moved  []*Moved
-	Import []*Import
+	Moved   []*Moved
+	Removed []*Removed
+	Import  []*Import
 
 	Checks map[string]*Check
 
@@ -88,8 +89,9 @@ type File struct {
 	ManagedResources []*Resource
 	DataResources    []*Resource
 
-	Moved  []*Moved
-	Import []*Import
+	Moved   []*Moved
+	Removed []*Removed
+	Import  []*Import
 
 	Checks []*Check
 }
@@ -420,16 +422,21 @@ func (m *Module) appendFile(file *File) hcl.Diagnostics {
 	// runtime.)
 	m.Moved = append(m.Moved, file.Moved...)
 
+	m.Removed = append(m.Removed, file.Removed...)
+
 	for _, i := range file.Import {
+		iTo, iToOK := parseImportToStatic(i.To)
 		for _, mi := range m.Import {
-			if i.To.Equal(mi.To) {
+			// Try to detect duplicate import targets. We need to see if the to
+			// address can be parsed statically.
+			miTo, miToOK := parseImportToStatic(mi.To)
+			if iToOK && miToOK && iTo.Equal(miTo) {
 				diags = append(diags, &hcl.Diagnostic{
 					Severity: hcl.DiagError,
-					Summary:  fmt.Sprintf("Duplicate import configuration for %q", i.To),
-					Detail:   fmt.Sprintf("An import block for the resource %q was already declared at %s. A resource can have only one import block.", i.To, mi.DeclRange),
-					Subject:  &i.DeclRange,
+					Summary:  fmt.Sprintf("Duplicate import configuration for %q", i.ToResource),
+					Detail:   fmt.Sprintf("An import block for the resource %q was already declared at %s. A resource can have only one import block.", i.ToResource, mi.DeclRange),
+					Subject:  i.To.Range().Ptr(),
 				})
-				continue
 			}
 		}
 
@@ -439,7 +446,7 @@ func (m *Module) appendFile(file *File) hcl.Diagnostics {
 				Alias:     i.ProviderConfigRef.Alias,
 			})
 		} else {
-			implied, err := addrs.ParseProviderPart(i.To.Resource.Resource.ImpliedProvider())
+			implied, err := addrs.ParseProviderPart(i.ToResource.Resource.ImpliedProvider())
 			if err == nil {
 				i.Provider = m.ImpliedProviderForUnqualifiedType(implied)
 			}
@@ -450,10 +457,10 @@ func (m *Module) appendFile(file *File) hcl.Diagnostics {
 		// It is invalid for any import block to have a "to" argument matching
 		// any moved block's "from" argument.
 		for _, mb := range m.Moved {
-			// Comparing string serialisations is good enough here, because we
-			// only care about equality in the case that both addresses are
-			// AbsResourceInstances.
-			if mb.From.String() == i.To.String() {
+			// FIXME: This is not correct for moved modules, and won't catch
+			// all combinations of expanded imports (though preventing
+			// collisions based on ConfigResource alone may be sufficient)
+			if mb.From.String() == i.ToResource.String() {
 				diags = append(diags, &hcl.Diagnostic{
 					Severity: hcl.DiagError,
 					Summary:  "Cannot import to a move source",
@@ -659,7 +666,7 @@ func (m *Module) mergeFile(file *File) hcl.Diagnostics {
 	return diags
 }
 
-// gatherProviderLocalNames is a helper function that populatesA a map of
+// gatherProviderLocalNames is a helper function that populates a map of
 // provider FQNs -> provider local names. This information is useful for
 // user-facing output, which should include both the FQN and LocalName. It must
 // only be populated after the module has been parsed.

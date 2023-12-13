@@ -11,10 +11,39 @@ import (
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs"
+	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/plans"
+	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/tfdiags"
 )
+
+// ApplyOpts are options that affect the details of how Terraform will apply a
+// previously-generated plan.
+type ApplyOpts struct {
+	// ExternalProviders is a set of pre-configured provider instances with
+	// the same purpose as [PlanOpts.ExternalProviders].
+	//
+	// Callers must pass providers that are configured in a similar way as
+	// the providers that were passed when creating the plan that's being
+	// applied, or the results will be erratic.
+	ExternalProviders map[addrs.RootProviderConfig]providers.Interface
+}
+
+// ApplyOpts creates an [ApplyOpts] with copies of all of the elements that
+// are expected to propagate from plan to apply when planning and applying
+// in the same process.
+//
+// In practice planning and applying are often separated into two different
+// executions, in which case callers must retain enough information between
+// plan and apply to construct an equivalent [ApplyOpts] themselves without
+// using this function. This is here mainly for convenient internal use such
+// as in test cases.
+func (po *PlanOpts) ApplyOpts() *ApplyOpts {
+	return &ApplyOpts{
+		ExternalProviders: po.ExternalProviders,
+	}
+}
 
 // Apply performs the actions described by the given Plan object and returns
 // the resulting updated state.
@@ -24,10 +53,38 @@ import (
 //
 // Even if the returned diagnostics contains errors, Apply always returns the
 // resulting state which is likely to have been partially-updated.
-func (c *Context) Apply(plan *plans.Plan, config *configs.Config) (*states.State, tfdiags.Diagnostics) {
-	defer c.acquireRun("apply")()
+//
+// The [opts] argument may be nil to indicate that no special options are
+// required. In that case, Apply will use a default set of options. Some
+// options in [PlanOpts] when creating a plan must be echoed with equivalent
+// settings during apply, so leaving opts as nil might not be valid for
+// certain combinations of plan-time options.
+func (c *Context) Apply(plan *plans.Plan, config *configs.Config, opts *ApplyOpts) (*states.State, tfdiags.Diagnostics) {
+	state, _, diags := c.ApplyAndEval(plan, config, opts)
+	return state, diags
+}
 
+// ApplyAndEval is like [Context.Apply] except that it additionally makes a
+// best effort to return a [lang.Scope] which can evaluate expressions in the
+// root module based on the content of the new state.
+//
+// The scope will be nil if the apply process doesn't complete successfully
+// enough to produce a valid evaluation scope. If the returned state is nil
+// then the scope will always be nil, but it's also possible for the scope
+// to be nil even when the state isn't, if the apply didn't complete enough for
+// the evaluation scope to produce consistent results.
+func (c *Context) ApplyAndEval(plan *plans.Plan, config *configs.Config, opts *ApplyOpts) (*states.State, *lang.Scope, tfdiags.Diagnostics) {
+	defer c.acquireRun("apply")()
+	var diags tfdiags.Diagnostics
+
+	if plan == nil {
+		panic("cannot apply nil plan")
+	}
 	log.Printf("[DEBUG] Building and walking apply graph for %s plan", plan.UIMode)
+
+	if opts == nil {
+		opts = &ApplyOpts{}
+	}
 
 	if plan.Errored {
 		var diags tfdiags.Diagnostics
@@ -36,7 +93,7 @@ func (c *Context) Apply(plan *plans.Plan, config *configs.Config) (*states.State
 			"Cannot apply failed plan",
 			`The given plan is incomplete due to errors during planning, and so it cannot be applied.`,
 		))
-		return nil, diags
+		return nil, nil, diags
 	}
 
 	for _, rc := range plan.Changes.Resources {
@@ -52,16 +109,25 @@ func (c *Context) Apply(plan *plans.Plan, config *configs.Config) (*states.State
 		}
 	}
 
-	graph, operation, diags := c.applyGraph(plan, config, true)
-	if diags.HasErrors() {
-		return nil, diags
+	graph, operation, moreDiags := c.applyGraph(plan, config, opts, true)
+	diags = diags.Append(moreDiags)
+	if moreDiags.HasErrors() {
+		return nil, nil, diags
+	}
+
+	moreDiags = checkExternalProviders(config, opts.ExternalProviders)
+	diags = diags.Append(moreDiags)
+	if moreDiags.HasErrors() {
+		return nil, nil, diags
 	}
 
 	workingState := plan.PriorState.DeepCopy()
 	walker, walkDiags := c.walk(graph, operation, &graphWalkOpts{
-		Config:     config,
-		InputState: workingState,
-		Changes:    plan.Changes,
+		Config:                  config,
+		InputState:              workingState,
+		Changes:                 plan.Changes,
+		Overrides:               plan.Overrides,
+		ExternalProviderConfigs: opts.ExternalProviders,
 
 		// We need to propagate the check results from the plan phase,
 		// because that will tell us which checkable objects we're expecting
@@ -114,10 +180,15 @@ Note that the -target option is not suitable for routine use, and is provided on
 		newState.CheckResults = plan.Checks.DeepCopy()
 	}
 
-	return newState, diags
+	// The caller also gets access to an expression evaluation scope in the
+	// root module, in case it needs to extract other information using
+	// expressions, like in "terraform console" or the test harness.
+	evalScope := evalScopeFromGraphWalk(walker, addrs.RootModuleInstance)
+
+	return newState, evalScope, diags
 }
 
-func (c *Context) applyGraph(plan *plans.Plan, config *configs.Config, validate bool) (*Graph, walkOperation, tfdiags.Diagnostics) {
+func (c *Context) applyGraph(plan *plans.Plan, config *configs.Config, opts *ApplyOpts, validate bool) (*Graph, walkOperation, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 
 	variables := InputValues{}
@@ -168,16 +239,22 @@ func (c *Context) applyGraph(plan *plans.Plan, config *configs.Config, validate 
 		operation = walkDestroy
 	}
 
+	var externalProviderConfigs map[addrs.RootProviderConfig]providers.Interface
+	if opts != nil {
+		externalProviderConfigs = opts.ExternalProviders
+	}
+
 	graph, moreDiags := (&ApplyGraphBuilder{
-		Config:             config,
-		Changes:            plan.Changes,
-		State:              plan.PriorState,
-		RootVariableValues: variables,
-		Plugins:            c.plugins,
-		Targets:            plan.TargetAddrs,
-		ForceReplace:       plan.ForceReplaceAddrs,
-		Operation:          operation,
-		ExternalReferences: plan.ExternalReferences,
+		Config:                  config,
+		Changes:                 plan.Changes,
+		State:                   plan.PriorState,
+		RootVariableValues:      variables,
+		ExternalProviderConfigs: externalProviderConfigs,
+		Plugins:                 c.plugins,
+		Targets:                 plan.TargetAddrs,
+		ForceReplace:            plan.ForceReplaceAddrs,
+		Operation:               operation,
+		ExternalReferences:      plan.ExternalReferences,
 	}).Build(addrs.RootModuleInstance)
 	diags = diags.Append(moreDiags)
 	if moreDiags.HasErrors() {
@@ -195,14 +272,14 @@ func (c *Context) applyGraph(plan *plans.Plan, config *configs.Config, validate 
 // The result of this is intended only for rendering ot the user as a dot
 // graph, and so may change in future in order to make the result more useful
 // in that context, even if drifts away from the physical graph that Terraform
-// Core currently uses as an implementation detail of planning.
+// Core currently uses as an implementation detail of applying.
 func (c *Context) ApplyGraphForUI(plan *plans.Plan, config *configs.Config) (*Graph, tfdiags.Diagnostics) {
 	// For now though, this really is just the internal graph, confusing
 	// implementation details and all.
 
 	var diags tfdiags.Diagnostics
 
-	graph, _, moreDiags := c.applyGraph(plan, config, false)
+	graph, _, moreDiags := c.applyGraph(plan, config, nil, false)
 	diags = diags.Append(moreDiags)
 	return graph, diags
 }

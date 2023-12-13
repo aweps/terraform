@@ -66,7 +66,7 @@ func (n *nodeExpandLocal) References() []*addrs.Reference {
 	return refs
 }
 
-func (n *nodeExpandLocal) DynamicExpand(ctx EvalContext) (*Graph, error) {
+func (n *nodeExpandLocal) DynamicExpand(ctx EvalContext) (*Graph, tfdiags.Diagnostics) {
 	var g Graph
 	expander := ctx.InstanceExpander()
 	for _, module := range expander.ExpandModule(n.Module) {
@@ -161,13 +161,7 @@ func (n *NodeLocal) Execute(ctx EvalContext, op walkOperation) (diags tfdiags.Di
 		return diags
 	}
 
-	state := ctx.State()
-	if state == nil {
-		diags = diags.Append(fmt.Errorf("cannot write local value to nil state"))
-		return diags
-	}
-
-	state.SetLocalValue(addr.Absolute(ctx.Path()), val)
+	ctx.NamedValues().SetLocalValue(addr.Absolute(ctx.Path()), val)
 
 	return diags
 }

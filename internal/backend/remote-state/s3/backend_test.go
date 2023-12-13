@@ -6,7 +6,9 @@ package s3
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"reflect"
@@ -15,10 +17,14 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/google/go-cmp/cmp"
 	"github.com/hashicorp/aws-sdk-go-base/v2/mockdata"
 	"github.com/hashicorp/aws-sdk-go-base/v2/servicemocks"
@@ -57,13 +63,24 @@ func TestBackend_impl(t *testing.T) {
 	var _ backend.Backend = new(Backend)
 }
 
+func TestBackend_InternalValidate(t *testing.T) {
+	b := New()
+
+	schema := b.ConfigSchema()
+	if err := schema.InternalValidate(); err != nil {
+		t.Fatalf("failed InternalValidate: %s", err)
+	}
+}
+
 func TestBackendConfig_original(t *testing.T) {
 	testACC(t)
 
 	ctx := context.TODO()
 
+	region := "us-west-1"
+
 	config := map[string]interface{}{
-		"region":         "us-west-1",
+		"region":         region,
 		"bucket":         "tf-test",
 		"key":            "state",
 		"encrypt":        true,
@@ -72,7 +89,7 @@ func TestBackendConfig_original(t *testing.T) {
 
 	b := backend.TestBackendConfig(t, New(), backend.TestWrapConfig(config)).(*Backend)
 
-	if b.awsConfig.Region != "us-west-1" {
+	if b.awsConfig.Region != region {
 		t.Fatalf("Incorrect region was populated")
 	}
 	if b.awsConfig.RetryMaxAttempts != 5 {
@@ -85,10 +102,6 @@ func TestBackendConfig_original(t *testing.T) {
 		t.Fatalf("Incorrect keyName was populated")
 	}
 
-	// checkClientEndpoint(t, b.s3Client.Config, "")
-
-	// checkClientEndpoint(t, b.dynClient.Config, "")
-
 	credentials, err := b.awsConfig.Credentials.Retrieve(ctx)
 	if err != nil {
 		t.Fatalf("Error when requesting credentials")
@@ -99,13 +112,49 @@ func TestBackendConfig_original(t *testing.T) {
 	if credentials.SecretAccessKey == "" {
 		t.Fatalf("No Secret Access Key was populated")
 	}
-}
 
-// func checkClientEndpoint(t *testing.T, config aws.Config, expected string) {
-// 	if a := aws.StringValue(config.Endpoint); a != expected {
-// 		t.Errorf("expected endpoint %q, got %q", expected, a)
-// 	}
-// }
+	// Check S3 Endpoint
+	expectedS3Endpoint := defaultEndpointS3(region)
+	var s3Endpoint string
+	_, err = b.s3Client.ListBuckets(ctx, &s3.ListBucketsInput{},
+		func(opts *s3.Options) {
+			opts.APIOptions = append(opts.APIOptions,
+				addRetrieveEndpointURLMiddleware(t, &s3Endpoint),
+				addCancelRequestMiddleware(),
+			)
+		},
+	)
+	if err == nil {
+		t.Fatal("Checking S3 Endpoint: Expected an error, got none")
+	} else if !errors.Is(err, errCancelOperation) {
+		t.Fatalf("Checking S3 Endpoint: Unexpected error: %s", err)
+	}
+
+	if s3Endpoint != expectedS3Endpoint {
+		t.Errorf("Checking S3 Endpoint: expected endpoint %q, got %q", expectedS3Endpoint, s3Endpoint)
+	}
+
+	// Check DynamoDB Endpoint
+	expectedDynamoDBEndpoint := defaultEndpointDynamo(region)
+	var dynamoDBEndpoint string
+	_, err = b.dynClient.ListTables(ctx, &dynamodb.ListTablesInput{},
+		func(opts *dynamodb.Options) {
+			opts.APIOptions = append(opts.APIOptions,
+				addRetrieveEndpointURLMiddleware(t, &dynamoDBEndpoint),
+				addCancelRequestMiddleware(),
+			)
+		},
+	)
+	if err == nil {
+		t.Fatal("Checking DynamoDB Endpoint: Expected an error, got none")
+	} else if !errors.Is(err, errCancelOperation) {
+		t.Fatalf("Checking DynamoDB Endpoint: Unexpected error: %s", err)
+	}
+
+	if dynamoDBEndpoint != expectedDynamoDBEndpoint {
+		t.Errorf("Checking DynamoDB Endpoint: expected endpoint %q, got %q", expectedDynamoDBEndpoint, dynamoDBEndpoint)
+	}
+}
 
 func TestBackendConfig_InvalidRegion(t *testing.T) {
 	testACC(t)
@@ -205,15 +254,12 @@ func TestBackendConfig_RegionEnvVar(t *testing.T) {
 	}
 }
 
-// TODO: Convert to AWS SDK v2 equivalent
-// func checkClientEndpoint(t *testing.T, config aws.Config, expected string) {
-// 	if a := aws.ToString(config.Endpoint); a != expected {
-// 		t.Errorf("expected endpoint %q, got %q", expected, a)
-// 	}
-// }
-
 func TestBackendConfig_DynamoDBEndpoint(t *testing.T) {
 	testACC(t)
+
+	ctx := context.TODO()
+
+	region := "us-west-1"
 
 	cases := map[string]struct {
 		config           map[string]any
@@ -222,33 +268,53 @@ func TestBackendConfig_DynamoDBEndpoint(t *testing.T) {
 		expectedDiags    tfdiags.Diagnostics
 	}{
 		"none": {
-			expectedEndpoint: "",
+			expectedEndpoint: defaultEndpointDynamo(region),
 		},
-		"config": {
+		"config URL": {
+			config: map[string]any{
+				"endpoints": map[string]any{
+					"dynamodb": "https://dynamo.test",
+				},
+			},
+			expectedEndpoint: "https://dynamo.test/",
+		},
+		"config hostname": {
 			config: map[string]any{
 				"endpoints": map[string]any{
 					"dynamodb": "dynamo.test",
 				},
 			},
-			expectedEndpoint: "dynamo.test",
-		},
-		"deprecated config": {
-			config: map[string]any{
-				"dynamodb_endpoint": "dynamo.test",
+			expectedEndpoint: "dynamo.test/",
+			expectedDiags: tfdiags.Diagnostics{
+				legacyIncompleteURLDiag("dynamo.test", cty.GetAttrPath("endpoints").GetAttr("dynamodb")),
 			},
-			expectedEndpoint: "dynamo.test",
+		},
+		"deprecated config URL": {
+			config: map[string]any{
+				"dynamodb_endpoint": "https://dynamo.test",
+			},
+			expectedEndpoint: "https://dynamo.test/",
 			expectedDiags: tfdiags.Diagnostics{
 				deprecatedAttrDiag(cty.GetAttrPath("dynamodb_endpoint"), cty.GetAttrPath("endpoints").GetAttr("dynamodb")),
 			},
 		},
-		"config conflict": {
+		"deprecated config hostname": {
 			config: map[string]any{
 				"dynamodb_endpoint": "dynamo.test",
+			},
+			expectedEndpoint: "dynamo.test/",
+			expectedDiags: tfdiags.Diagnostics{
+				deprecatedAttrDiag(cty.GetAttrPath("dynamodb_endpoint"), cty.GetAttrPath("endpoints").GetAttr("dynamodb")),
+				legacyIncompleteURLDiag("dynamo.test", cty.GetAttrPath("dynamodb_endpoint")),
+			},
+		},
+		"config conflict": {
+			config: map[string]any{
+				"dynamodb_endpoint": "https://dynamo.test",
 				"endpoints": map[string]any{
-					"dynamodb": "dynamo.test",
+					"dynamodb": "https://dynamo.test",
 				},
 			},
-			expectedEndpoint: "s3.test",
 			expectedDiags: tfdiags.Diagnostics{
 				deprecatedAttrDiag(cty.GetAttrPath("dynamodb_endpoint"), cty.GetAttrPath("endpoints").GetAttr("dynamodb")),
 				wholeBodyErrDiag(
@@ -261,15 +327,15 @@ func TestBackendConfig_DynamoDBEndpoint(t *testing.T) {
 		},
 		"envvar": {
 			vars: map[string]string{
-				"AWS_ENDPOINT_URL_DYNAMODB": "dynamo.test",
+				"AWS_ENDPOINT_URL_DYNAMODB": "https://dynamo.test",
 			},
-			expectedEndpoint: "dynamo.test",
+			expectedEndpoint: "https://dynamo.test/",
 		},
 		"deprecated envvar": {
 			vars: map[string]string{
-				"AWS_DYNAMODB_ENDPOINT": "dynamo.test",
+				"AWS_DYNAMODB_ENDPOINT": "https://dynamo.test",
 			},
-			expectedEndpoint: "dynamo.test",
+			expectedEndpoint: "https://dynamo.test/",
 			expectedDiags: tfdiags.Diagnostics{
 				deprecatedEnvVarDiag("AWS_DYNAMODB_ENDPOINT", "AWS_ENDPOINT_URL_DYNAMODB"),
 			},
@@ -279,7 +345,7 @@ func TestBackendConfig_DynamoDBEndpoint(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			config := map[string]interface{}{
-				"region": "us-west-1",
+				"region": region,
 				"bucket": "tf-test",
 				"key":    "state",
 			}
@@ -301,18 +367,32 @@ func TestBackendConfig_DynamoDBEndpoint(t *testing.T) {
 				}
 			}
 
-			_, diags := testBackendConfigDiags(t, New(), backend.TestWrapConfig(config))
-			// raw, diags := testBackendConfigDiags(t, New(), backend.TestWrapConfig(config))
-			// b := raw.(*Backend)
+			raw, diags := testBackendConfigDiags(t, New(), backend.TestWrapConfig(config))
+			b := raw.(*Backend)
 
 			if diff := cmp.Diff(diags, tc.expectedDiags, cmp.Comparer(diagnosticComparer)); diff != "" {
 				t.Errorf("unexpected diagnostics difference: %s", diff)
 			}
 
 			if !diags.HasErrors() {
-				// TODO: Convert to AWS SDK v2 equivalent
-				// pass b.awsConfig.EndpointResolver into helper func, calling .Resolve() method?
-				// checkClientEndpoint(t, b.dynClient.options, tc.expectedEndpoint)
+				var dynamoDBEndpoint string
+				_, err := b.dynClient.ListTables(ctx, &dynamodb.ListTablesInput{},
+					func(opts *dynamodb.Options) {
+						opts.APIOptions = append(opts.APIOptions,
+							addRetrieveEndpointURLMiddleware(t, &dynamoDBEndpoint),
+							addCancelRequestMiddleware(),
+						)
+					},
+				)
+				if err == nil {
+					t.Fatal("Expected an error, got none")
+				} else if !errors.Is(err, errCancelOperation) {
+					t.Fatalf("Unexpected error: %s", err)
+				}
+
+				if dynamoDBEndpoint != tc.expectedEndpoint {
+					t.Errorf("expected endpoint %q, got %q", tc.expectedEndpoint, dynamoDBEndpoint)
+				}
 			}
 		})
 	}
@@ -329,26 +409,45 @@ func TestBackendConfig_IAMEndpoint(t *testing.T) {
 		expectedDiags tfdiags.Diagnostics
 	}{
 		"none": {},
-		"config": {
+		"config URL": {
+			config: map[string]any{
+				"endpoints": map[string]any{
+					"iam": "https://iam.test",
+				},
+			},
+		},
+		"config hostname": {
 			config: map[string]any{
 				"endpoints": map[string]any{
 					"iam": "iam.test",
 				},
 			},
+			expectedDiags: tfdiags.Diagnostics{
+				legacyIncompleteURLDiag("iam.test", cty.GetAttrPath("endpoints").GetAttr("iam")),
+			},
 		},
-		"deprecated config": {
+		"deprecated config URL": {
 			config: map[string]any{
-				"iam_endpoint": "iam.test",
+				"iam_endpoint": "https://iam.test",
 			},
 			expectedDiags: tfdiags.Diagnostics{
 				deprecatedAttrDiag(cty.GetAttrPath("iam_endpoint"), cty.GetAttrPath("endpoints").GetAttr("iam")),
 			},
 		},
-		"config conflict": {
+		"deprecated config hostname": {
 			config: map[string]any{
 				"iam_endpoint": "iam.test",
+			},
+			expectedDiags: tfdiags.Diagnostics{
+				deprecatedAttrDiag(cty.GetAttrPath("iam_endpoint"), cty.GetAttrPath("endpoints").GetAttr("iam")),
+				legacyIncompleteURLDiag("iam.test", cty.GetAttrPath("iam_endpoint")),
+			},
+		},
+		"config conflict": {
+			config: map[string]any{
+				"iam_endpoint": "https://iam.test",
 				"endpoints": map[string]any{
-					"iam": "iam.test",
+					"iam": "https://iam.test",
 				},
 			},
 			expectedDiags: tfdiags.Diagnostics{
@@ -363,12 +462,12 @@ func TestBackendConfig_IAMEndpoint(t *testing.T) {
 		},
 		"envvar": {
 			vars: map[string]string{
-				"AWS_ENDPOINT_URL_IAM": "iam.test",
+				"AWS_ENDPOINT_URL_IAM": "https://iam.test",
 			},
 		},
 		"deprecated envvar": {
 			vars: map[string]string{
-				"AWS_IAM_ENDPOINT": "iam.test",
+				"AWS_IAM_ENDPOINT": "https://iam.test",
 			},
 			expectedDiags: tfdiags.Diagnostics{
 				deprecatedEnvVarDiag("AWS_IAM_ENDPOINT", "AWS_ENDPOINT_URL_IAM"),
@@ -413,6 +512,10 @@ func TestBackendConfig_IAMEndpoint(t *testing.T) {
 func TestBackendConfig_S3Endpoint(t *testing.T) {
 	testACC(t)
 
+	ctx := context.TODO()
+
+	region := "us-west-1"
+
 	cases := map[string]struct {
 		config           map[string]any
 		vars             map[string]string
@@ -420,33 +523,53 @@ func TestBackendConfig_S3Endpoint(t *testing.T) {
 		expectedDiags    tfdiags.Diagnostics
 	}{
 		"none": {
-			expectedEndpoint: "",
+			expectedEndpoint: defaultEndpointS3(region),
 		},
-		"config": {
+		"config URL": {
+			config: map[string]any{
+				"endpoints": map[string]any{
+					"s3": "https://s3.test",
+				},
+			},
+			expectedEndpoint: "https://s3.test/",
+		},
+		"config hostname": {
 			config: map[string]any{
 				"endpoints": map[string]any{
 					"s3": "s3.test",
 				},
 			},
-			expectedEndpoint: "s3.test",
-		},
-		"deprecated config": {
-			config: map[string]any{
-				"endpoint": "s3.test",
+			expectedEndpoint: "/s3.test",
+			expectedDiags: tfdiags.Diagnostics{
+				legacyIncompleteURLDiag("s3.test", cty.GetAttrPath("endpoints").GetAttr("s3")),
 			},
-			expectedEndpoint: "s3.test",
+		},
+		"deprecated config URL": {
+			config: map[string]any{
+				"endpoint": "https://s3.test",
+			},
+			expectedEndpoint: "https://s3.test/",
 			expectedDiags: tfdiags.Diagnostics{
 				deprecatedAttrDiag(cty.GetAttrPath("endpoint"), cty.GetAttrPath("endpoints").GetAttr("s3")),
 			},
 		},
-		"config conflict": {
+		"deprecated config hostname": {
 			config: map[string]any{
 				"endpoint": "s3.test",
+			},
+			expectedEndpoint: "/s3.test",
+			expectedDiags: tfdiags.Diagnostics{
+				deprecatedAttrDiag(cty.GetAttrPath("endpoint"), cty.GetAttrPath("endpoints").GetAttr("s3")),
+				legacyIncompleteURLDiag("s3.test", cty.GetAttrPath("endpoint")),
+			},
+		},
+		"config conflict": {
+			config: map[string]any{
+				"endpoint": "https://s3.test",
 				"endpoints": map[string]any{
-					"s3": "s3.test",
+					"s3": "https://s3.test",
 				},
 			},
-			expectedEndpoint: "s3.test",
 			expectedDiags: tfdiags.Diagnostics{
 				deprecatedAttrDiag(cty.GetAttrPath("endpoint"), cty.GetAttrPath("endpoints").GetAttr("s3")),
 				wholeBodyErrDiag(
@@ -459,17 +582,177 @@ func TestBackendConfig_S3Endpoint(t *testing.T) {
 		},
 		"envvar": {
 			vars: map[string]string{
-				"AWS_ENDPOINT_URL_S3": "s3.test",
+				"AWS_ENDPOINT_URL_S3": "https://s3.test",
 			},
-			expectedEndpoint: "s3.test",
+			expectedEndpoint: "https://s3.test/",
 		},
 		"deprecated envvar": {
 			vars: map[string]string{
-				"AWS_S3_ENDPOINT": "s3.test",
+				"AWS_S3_ENDPOINT": "https://s3.test",
 			},
-			expectedEndpoint: "s3.test",
+			expectedEndpoint: "https://s3.test/",
 			expectedDiags: tfdiags.Diagnostics{
 				deprecatedEnvVarDiag("AWS_S3_ENDPOINT", "AWS_ENDPOINT_URL_S3"),
+			},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			config := map[string]interface{}{
+				"region": region,
+				"bucket": "tf-test",
+				"key":    "state",
+			}
+
+			if tc.vars != nil {
+				for k, v := range tc.vars {
+					os.Setenv(k, v)
+				}
+				t.Cleanup(func() {
+					for k := range tc.vars {
+						os.Unsetenv(k)
+					}
+				})
+			}
+
+			if tc.config != nil {
+				for k, v := range tc.config {
+					config[k] = v
+				}
+			}
+
+			raw, diags := testBackendConfigDiags(t, New(), backend.TestWrapConfig(config))
+			b := raw.(*Backend)
+
+			if diff := cmp.Diff(diags, tc.expectedDiags, cmp.Comparer(diagnosticComparer)); diff != "" {
+				t.Errorf("unexpected diagnostics difference: %s", diff)
+			}
+
+			if !diags.HasErrors() {
+				var s3Endpoint string
+				_, err := b.s3Client.ListBuckets(ctx, &s3.ListBucketsInput{},
+					func(opts *s3.Options) {
+						opts.APIOptions = append(opts.APIOptions,
+							addRetrieveEndpointURLMiddleware(t, &s3Endpoint),
+							addCancelRequestMiddleware(),
+						)
+					},
+				)
+				if err == nil {
+					t.Fatal("Expected an error, got none")
+				} else if !errors.Is(err, errCancelOperation) {
+					t.Fatalf("Unexpected error: %s", err)
+				}
+
+				if s3Endpoint != tc.expectedEndpoint {
+					t.Errorf("expected endpoint %q, got %q", tc.expectedEndpoint, s3Endpoint)
+				}
+			}
+		})
+	}
+}
+
+func TestBackendConfig_EC2MetadataEndpoint(t *testing.T) {
+	testACC(t)
+
+	ctx := context.TODO()
+
+	cases := map[string]struct {
+		config           map[string]any
+		vars             map[string]string
+		expectedEndpoint string
+		expectedDiags    tfdiags.Diagnostics
+	}{
+		"none": {
+			expectedEndpoint: "http://169.254.169.254/latest/meta-data",
+		},
+		"config URL": {
+			config: map[string]any{
+				"ec2_metadata_service_endpoint": "https://ec2.test",
+			},
+			expectedEndpoint: "https://ec2.test/latest/meta-data",
+		},
+		"config hostname": {
+			config: map[string]any{
+				"ec2_metadata_service_endpoint": "ec2.test",
+			},
+			expectedDiags: tfdiags.Diagnostics{
+				attributeErrDiag(
+					"Invalid Value",
+					`The value must be a valid URL containing at least a scheme and hostname. Had "ec2.test"`,
+					cty.GetAttrPath("ec2_metadata_service_endpoint"),
+				),
+			},
+		},
+		"config IPv4 mode": {
+			config: map[string]any{
+				"ec2_metadata_service_endpoint":      "https://ec2.test",
+				"ec2_metadata_service_endpoint_mode": "IPv4",
+			},
+			expectedEndpoint: "https://ec2.test/latest/meta-data",
+		},
+		"config IPv6 mode": {
+			config: map[string]any{
+				"ec2_metadata_service_endpoint":      "https://ec2.test",
+				"ec2_metadata_service_endpoint_mode": "IPv6",
+			},
+			expectedEndpoint: "https://ec2.test/latest/meta-data",
+		},
+		"config invalid mode": {
+			config: map[string]any{
+				"ec2_metadata_service_endpoint":      "https://ec2.test",
+				"ec2_metadata_service_endpoint_mode": "invalid",
+			},
+			expectedDiags: tfdiags.Diagnostics{
+				attributeErrDiag(
+					"Invalid Value",
+					"Value must be one of [IPv4, IPv6]",
+					cty.GetAttrPath("ec2_metadata_service_endpoint_mode"),
+				),
+			},
+		},
+		"envvar": {
+			vars: map[string]string{
+				"AWS_EC2_METADATA_SERVICE_ENDPOINT": "https://ec2.test",
+			},
+			expectedEndpoint: "https://ec2.test/latest/meta-data",
+		},
+		"envvar IPv4 mode": {
+			vars: map[string]string{
+				"AWS_EC2_METADATA_SERVICE_ENDPOINT":      "https://ec2.test",
+				"AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE": "IPv4",
+			},
+			expectedEndpoint: "https://ec2.test/latest/meta-data",
+		},
+		"envvar IPv6 mode": {
+			vars: map[string]string{
+				"AWS_EC2_METADATA_SERVICE_ENDPOINT":      "https://ec2.test",
+				"AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE": "IPv6",
+			},
+			expectedEndpoint: "https://ec2.test/latest/meta-data",
+		},
+		"envvar invalid mode": {
+			vars: map[string]string{
+				"AWS_EC2_METADATA_SERVICE_ENDPOINT":      "https://ec2.test",
+				"AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE": "invalid",
+			},
+			// expectedEndpoint: "ec2.test",
+			expectedDiags: tfdiags.Diagnostics{
+				tfdiags.Sourceless(
+					tfdiags.Error,
+					"unknown EC2 IMDS endpoint mode, must be either IPv6 or IPv4",
+					"",
+				),
+			},
+		},
+		"deprecated envvar": {
+			vars: map[string]string{
+				"AWS_METADATA_URL": "https://ec2.test",
+			},
+			expectedEndpoint: "https://ec2.test/latest/meta-data",
+			expectedDiags: tfdiags.Diagnostics{
+				deprecatedEnvVarDiag("AWS_METADATA_URL", "AWS_EC2_METADATA_SERVICE_ENDPOINT"),
 			},
 		},
 	}
@@ -499,18 +782,33 @@ func TestBackendConfig_S3Endpoint(t *testing.T) {
 				}
 			}
 
-			_, diags := testBackendConfigDiags(t, New(), backend.TestWrapConfig(config))
-			// raw, diags := testBackendConfigDiags(t, New(), backend.TestWrapConfig(config))
-			// b := raw.(*Backend)
+			raw, diags := testBackendConfigDiags(t, New(), backend.TestWrapConfig(config))
+			b := raw.(*Backend)
 
 			if diff := cmp.Diff(diags, tc.expectedDiags, cmp.Comparer(diagnosticComparer)); diff != "" {
 				t.Errorf("unexpected diagnostics difference: %s", diff)
 			}
 
 			if !diags.HasErrors() {
-				// TODO: Convert to AWS SDK v2 equivalent
-				// pass b.awsConfig.EndpointResolver into helper func, calling .Resolve() method?
-				// checkClientEndpoint(t, b.s3Client.Config, tc.expectedEndpoint)
+				var imdsEndpoint string
+				imdsClient := imds.NewFromConfig(b.awsConfig)
+				_, err := imdsClient.GetMetadata(ctx, &imds.GetMetadataInput{},
+					func(opts *imds.Options) {
+						opts.APIOptions = append(opts.APIOptions,
+							addRetrieveEndpointURLMiddleware(t, &imdsEndpoint),
+							addCancelRequestMiddleware(),
+						)
+					},
+				)
+				if err == nil {
+					t.Fatal("Expected an error, got none")
+				} else if !errors.Is(err, errCancelOperation) {
+					t.Fatalf("Unexpected error: %s", err)
+				}
+
+				if imdsEndpoint != tc.expectedEndpoint {
+					t.Errorf("expected endpoint %q, got %q", tc.expectedEndpoint, imdsEndpoint)
+				}
 			}
 		})
 	}
@@ -830,6 +1128,20 @@ func TestBackendConfig_PrepareConfigValidation(t *testing.T) {
 				),
 			},
 		},
+		"key with double slash": {
+			config: cty.ObjectVal(map[string]cty.Value{
+				"bucket": cty.StringVal("test"),
+				"key":    cty.StringVal("test/with/double//slash"),
+				"region": cty.StringVal("us-west-2"),
+			}),
+			expectedDiags: tfdiags.Diagnostics{
+				attributeErrDiag(
+					"Invalid Value",
+					`Value must not contain "//"`,
+					cty.GetAttrPath("key"),
+				),
+			},
+		},
 
 		"null region": {
 			config: cty.ObjectVal(map[string]cty.Value{
@@ -930,12 +1242,28 @@ func TestBackendConfig_PrepareConfigValidation(t *testing.T) {
 				),
 			},
 		},
+
+		"allowed forbidden account ids conflict": {
+			config: cty.ObjectVal(map[string]cty.Value{
+				"bucket":                cty.StringVal("test"),
+				"key":                   cty.StringVal("test"),
+				"region":                cty.StringVal("us-west-2"),
+				"allowed_account_ids":   cty.SetVal([]cty.Value{cty.StringVal("012345678901")}),
+				"forbidden_account_ids": cty.SetVal([]cty.Value{cty.StringVal("012345678901")}),
+			}),
+			expectedDiags: tfdiags.Diagnostics{
+				attributeErrDiag(
+					"Invalid Attribute Combination",
+					`Only one of allowed_account_ids, forbidden_account_ids can be set.`,
+					cty.Path{},
+				),
+			},
+		},
 	}
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			oldEnv := servicemocks.StashEnv()
-			defer servicemocks.PopEnv(oldEnv)
+			servicemocks.StashEnv(t)
 
 			b := New()
 
@@ -978,8 +1306,7 @@ func TestBackendConfig_PrepareConfigWithEnvVars(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			oldEnv := servicemocks.StashEnv()
-			defer servicemocks.PopEnv(oldEnv)
+			servicemocks.StashEnv(t)
 
 			b := New()
 
@@ -1004,7 +1331,479 @@ func TestBackendConfig_PrepareConfigWithEnvVars(t *testing.T) {
 	}
 }
 
-func TestBackend(t *testing.T) {
+type proxyCase struct {
+	url           string
+	expectedProxy string
+}
+
+func TestBackendConfig_Proxy(t *testing.T) {
+	cases := map[string]struct {
+		config               map[string]any
+		environmentVariables map[string]string
+		expectedDiags        tfdiags.Diagnostics
+		urls                 []proxyCase
+	}{
+		"no config": {
+			config: map[string]any{},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "",
+				},
+			},
+		},
+
+		"http_proxy empty string": {
+			config: map[string]any{
+				"http_proxy": "",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "",
+				},
+			},
+		},
+
+		"http_proxy config": {
+			config: map[string]any{
+				"http_proxy": "http://http-proxy.test:1234",
+			},
+			expectedDiags: tfdiags.Diagnostics{
+				tfdiags.Sourceless(
+					tfdiags.Warning,
+					"Missing HTTPS Proxy",
+					fmt.Sprintf(
+						"An HTTP proxy was set but no HTTPS proxy was. Using HTTP proxy %q for HTTPS requests. This behavior may change in future versions.\n\n"+
+							"To specify no proxy for HTTPS, set the HTTPS to an empty string.",
+						"http://http-proxy.test:1234"),
+				),
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+			},
+		},
+
+		"https_proxy config": {
+			config: map[string]any{
+				"https_proxy": "http://https-proxy.test:1234",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://https-proxy.test:1234",
+				},
+			},
+		},
+
+		"http_proxy config https_proxy config": {
+			config: map[string]any{
+				"http_proxy":  "http://http-proxy.test:1234",
+				"https_proxy": "http://https-proxy.test:1234",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://https-proxy.test:1234",
+				},
+			},
+		},
+
+		"http_proxy config https_proxy config empty string": {
+			config: map[string]any{
+				"http_proxy":  "http://http-proxy.test:1234",
+				"https_proxy": "",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "",
+				},
+			},
+		},
+
+		"https_proxy config http_proxy config empty string": {
+			config: map[string]any{
+				"http_proxy":  "",
+				"https_proxy": "http://https-proxy.test:1234",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://https-proxy.test:1234",
+				},
+			},
+		},
+
+		"http_proxy config https_proxy config no_proxy config": {
+			config: map[string]any{
+				"http_proxy":  "http://http-proxy.test:1234",
+				"https_proxy": "http://https-proxy.test:1234",
+				"no_proxy":    "dont-proxy.test",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+				{
+					url:           "http://dont-proxy.test",
+					expectedProxy: "",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://https-proxy.test:1234",
+				},
+				{
+					url:           "https://dont-proxy.test",
+					expectedProxy: "",
+				},
+			},
+		},
+
+		"HTTP_PROXY envvar": {
+			config: map[string]any{},
+			environmentVariables: map[string]string{
+				"HTTP_PROXY": "http://http-proxy.test:1234",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "",
+				},
+			},
+		},
+
+		"http_proxy envvar": {
+			config: map[string]any{},
+			environmentVariables: map[string]string{
+				"http_proxy": "http://http-proxy.test:1234",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "",
+				},
+			},
+		},
+
+		"HTTPS_PROXY envvar": {
+			config: map[string]any{},
+			environmentVariables: map[string]string{
+				"HTTPS_PROXY": "http://https-proxy.test:1234",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://https-proxy.test:1234",
+				},
+			},
+		},
+
+		"https_proxy envvar": {
+			config: map[string]any{},
+			environmentVariables: map[string]string{
+				"https_proxy": "http://https-proxy.test:1234",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://https-proxy.test:1234",
+				},
+			},
+		},
+
+		"http_proxy config HTTPS_PROXY envvar": {
+			config: map[string]any{
+				"http_proxy": "http://http-proxy.test:1234",
+			},
+			environmentVariables: map[string]string{
+				"HTTPS_PROXY": "http://https-proxy.test:1234",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://https-proxy.test:1234",
+				},
+			},
+		},
+
+		"http_proxy config https_proxy envvar": {
+			config: map[string]any{
+				"http_proxy": "http://http-proxy.test:1234",
+			},
+			environmentVariables: map[string]string{
+				"https_proxy": "http://https-proxy.test:1234",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://https-proxy.test:1234",
+				},
+			},
+		},
+
+		"http_proxy config NO_PROXY envvar": {
+			config: map[string]any{
+				"http_proxy": "http://http-proxy.test:1234",
+			},
+			environmentVariables: map[string]string{
+				"NO_PROXY": "dont-proxy.test",
+			},
+			expectedDiags: tfdiags.Diagnostics{
+				tfdiags.Sourceless(
+					tfdiags.Warning,
+					"Missing HTTPS Proxy",
+					fmt.Sprintf(
+						"An HTTP proxy was set but no HTTPS proxy was. Using HTTP proxy %q for HTTPS requests. This behavior may change in future versions.\n\n"+
+							"To specify no proxy for HTTPS, set the HTTPS to an empty string.",
+						"http://http-proxy.test:1234"),
+				),
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+				{
+					url:           "http://dont-proxy.test",
+					expectedProxy: "",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+				{
+					url:           "https://dont-proxy.test",
+					expectedProxy: "",
+				},
+			},
+		},
+
+		"http_proxy config no_proxy envvar": {
+			config: map[string]any{
+				"http_proxy": "http://http-proxy.test:1234",
+			},
+			environmentVariables: map[string]string{
+				"no_proxy": "dont-proxy.test",
+			},
+			expectedDiags: tfdiags.Diagnostics{
+				tfdiags.Sourceless(
+					tfdiags.Warning,
+					"Missing HTTPS Proxy",
+					fmt.Sprintf(
+						"An HTTP proxy was set but no HTTPS proxy was. Using HTTP proxy %q for HTTPS requests. This behavior may change in future versions.\n\n"+
+							"To specify no proxy for HTTPS, set the HTTPS to an empty string.",
+						"http://http-proxy.test:1234"),
+				),
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+				{
+					url:           "http://dont-proxy.test",
+					expectedProxy: "",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+				{
+					url:           "https://dont-proxy.test",
+					expectedProxy: "",
+				},
+			},
+		},
+
+		"HTTP_PROXY envvar HTTPS_PROXY envvar NO_PROXY envvar": {
+			config: map[string]any{},
+			environmentVariables: map[string]string{
+				"HTTP_PROXY":  "http://http-proxy.test:1234",
+				"HTTPS_PROXY": "http://https-proxy.test:1234",
+				"NO_PROXY":    "dont-proxy.test",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "http://http-proxy.test:1234",
+				},
+				{
+					url:           "http://dont-proxy.test",
+					expectedProxy: "",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://https-proxy.test:1234",
+				},
+				{
+					url:           "https://dont-proxy.test",
+					expectedProxy: "",
+				},
+			},
+		},
+
+		"http_proxy config overrides HTTP_PROXY envvar": {
+			config: map[string]any{
+				"http_proxy": "http://config-proxy.test:1234",
+			},
+			environmentVariables: map[string]string{
+				"HTTP_PROXY": "http://envvar-proxy.test:1234",
+			},
+			expectedDiags: tfdiags.Diagnostics{
+				tfdiags.Sourceless(
+					tfdiags.Warning,
+					"Missing HTTPS Proxy",
+					fmt.Sprintf(
+						"An HTTP proxy was set but no HTTPS proxy was. Using HTTP proxy %q for HTTPS requests. This behavior may change in future versions.\n\n"+
+							"To specify no proxy for HTTPS, set the HTTPS to an empty string.",
+						"http://config-proxy.test:1234"),
+				),
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "http://config-proxy.test:1234",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://config-proxy.test:1234",
+				},
+			},
+		},
+
+		"https_proxy config overrides HTTPS_PROXY envvar": {
+			config: map[string]any{
+				"https_proxy": "http://config-proxy.test:1234",
+			},
+			environmentVariables: map[string]string{
+				"HTTPS_PROXY": "http://envvar-proxy.test:1234",
+			},
+			urls: []proxyCase{
+				{
+					url:           "http://example.com",
+					expectedProxy: "",
+				},
+				{
+					url:           "https://example.com",
+					expectedProxy: "http://config-proxy.test:1234",
+				},
+			},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			config := map[string]any{
+				"region":                      "us-west-2",
+				"bucket":                      "tf-test",
+				"key":                         "state",
+				"skip_credentials_validation": true,
+				"skip_requesting_account_id":  true,
+				"access_key":                  servicemocks.MockStaticAccessKey,
+				"secret_key":                  servicemocks.MockStaticSecretKey,
+			}
+
+			for k, v := range tc.environmentVariables {
+				t.Setenv(k, v)
+			}
+
+			maps.Copy(config, tc.config)
+
+			raw, diags := testBackendConfigDiags(t, New(), backend.TestWrapConfig(config))
+			b := raw.(*Backend)
+
+			if diff := cmp.Diff(diags, tc.expectedDiags, cmp.Comparer(diagnosticComparer)); diff != "" {
+				t.Errorf("unexpected diagnostics difference: %s", diff)
+			}
+
+			client := b.awsConfig.HTTPClient
+			bClient, ok := client.(*awshttp.BuildableClient)
+			if !ok {
+				t.Fatalf("expected awshttp.BuildableClient, got %T", client)
+			}
+			transport := bClient.GetTransport()
+			proxyF := transport.Proxy
+
+			for _, url := range tc.urls {
+				req, _ := http.NewRequest("GET", url.url, nil)
+				pUrl, err := proxyF(req)
+				if err != nil {
+					t.Fatalf("unexpected error: %s", err)
+				}
+				if url.expectedProxy != "" {
+					if pUrl == nil {
+						t.Errorf("expected proxy for %q, got none", url.url)
+					} else if pUrl.String() != url.expectedProxy {
+						t.Errorf("expected proxy %q for %q, got %q", url.expectedProxy, url.url, pUrl.String())
+					}
+				} else {
+					if pUrl != nil {
+						t.Errorf("expected no proxy for %q, got %q", url.url, pUrl.String())
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestBackendBasic(t *testing.T) {
 	testACC(t)
 
 	ctx := context.TODO()
@@ -1020,7 +1819,7 @@ func TestBackend(t *testing.T) {
 	})).(*Backend)
 
 	createS3Bucket(ctx, t, b.s3Client, bucketName, b.awsConfig.Region)
-	defer deleteS3Bucket(ctx, t, b.s3Client, bucketName)
+	defer deleteS3Bucket(ctx, t, b.s3Client, bucketName, b.awsConfig.Region)
 
 	backend.TestBackendStates(t, b)
 }
@@ -1050,7 +1849,7 @@ func TestBackendLocked(t *testing.T) {
 	})).(*Backend)
 
 	createS3Bucket(ctx, t, b1.s3Client, bucketName, b1.awsConfig.Region)
-	defer deleteS3Bucket(ctx, t, b1.s3Client, bucketName)
+	defer deleteS3Bucket(ctx, t, b1.s3Client, bucketName, b1.awsConfig.Region)
 	createDynamoDBTable(ctx, t, b1.dynClient, bucketName)
 	defer deleteDynamoDBTable(ctx, t, b1.dynClient, bucketName)
 
@@ -1250,7 +2049,7 @@ func TestBackendSSECustomerKey(t *testing.T) {
 
 			if !diags.HasErrors() {
 				createS3Bucket(ctx, t, b.s3Client, bucketName, b.awsConfig.Region)
-				defer deleteS3Bucket(ctx, t, b.s3Client, bucketName)
+				defer deleteS3Bucket(ctx, t, b.s3Client, bucketName, b.awsConfig.Region)
 
 				backend.TestBackendStates(t, b)
 			}
@@ -1274,7 +2073,7 @@ func TestBackendExtraPaths(t *testing.T) {
 	})).(*Backend)
 
 	createS3Bucket(ctx, t, b.s3Client, bucketName, b.awsConfig.Region)
-	defer deleteS3Bucket(ctx, t, b.s3Client, bucketName)
+	defer deleteS3Bucket(ctx, t, b.s3Client, bucketName, b.awsConfig.Region)
 
 	// put multiple states in old env paths.
 	s1 := states.NewState()
@@ -1415,7 +2214,7 @@ func TestBackendPrefixInWorkspace(t *testing.T) {
 	})).(*Backend)
 
 	createS3Bucket(ctx, t, b.s3Client, bucketName, b.awsConfig.Region)
-	defer deleteS3Bucket(ctx, t, b.s3Client, bucketName)
+	defer deleteS3Bucket(ctx, t, b.s3Client, bucketName, b.awsConfig.Region)
 
 	// get a state that contains the prefix as a substring
 	sMgr, err := b.StateMgr("env-1")
@@ -1429,6 +2228,70 @@ func TestBackendPrefixInWorkspace(t *testing.T) {
 	if err := checkStateList(b, []string{"default", "env-1"}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestBackendWrongRegion(t *testing.T) {
+	testACC(t)
+
+	ctx := context.TODO()
+
+	bucketName := fmt.Sprintf("terraform-remote-s3-test-%x", time.Now().Unix())
+	keyName := "testState"
+
+	bucketRegion := "us-west-1"
+	backendRegion := "us-east-1"
+	if backendRegion == bucketRegion {
+		t.Fatalf("bucket region and backend region must not be the same")
+	}
+
+	b := backend.TestBackendConfig(t, New(), backend.TestWrapConfig(map[string]interface{}{
+		"bucket":  bucketName,
+		"key":     keyName,
+		"encrypt": true,
+		"region":  backendRegion,
+	})).(*Backend)
+
+	createS3Bucket(ctx, t, b.s3Client, bucketName, bucketRegion)
+	defer deleteS3Bucket(ctx, t, b.s3Client, bucketName, bucketRegion)
+
+	if _, err := b.StateMgr(backend.DefaultStateName); err == nil {
+		t.Fatal("expected error, got none")
+	} else {
+		if regionErr, ok := As[bucketRegionError](err); ok {
+			if a, e := regionErr.bucketRegion, bucketRegion; a != e {
+				t.Errorf("expected bucket region %q, got %q", e, a)
+			}
+			if a, e := regionErr.requestRegion, backendRegion; a != e {
+				t.Errorf("expected request region %q, got %q", e, a)
+			}
+		} else {
+			t.Fatalf("expected bucket region error, got: %v", err)
+		}
+	}
+}
+
+func TestBackendS3ObjectLock(t *testing.T) {
+	testACC(t)
+
+	ctx := context.TODO()
+
+	bucketName := fmt.Sprintf("terraform-remote-s3-test-%x", time.Now().Unix())
+	keyName := "testState"
+
+	b := backend.TestBackendConfig(t, New(), backend.TestWrapConfig(map[string]interface{}{
+		"bucket":  bucketName,
+		"key":     keyName,
+		"encrypt": true,
+		"region":  "us-west-1",
+	})).(*Backend)
+
+	createS3Bucket(ctx, t, b.s3Client, bucketName, b.awsConfig.Region,
+		s3BucketWithVersioning,
+		s3BucketWithObjectLock(s3types.ObjectLockRetentionModeCompliance),
+	)
+	defer deleteS3Bucket(ctx, t, b.s3Client, bucketName, b.awsConfig.Region)
+
+	backend.TestBackendStates(t, b)
 }
 
 func TestKeyEnv(t *testing.T) {
@@ -1447,7 +2310,7 @@ func TestKeyEnv(t *testing.T) {
 	})).(*Backend)
 
 	createS3Bucket(ctx, t, b0.s3Client, bucket0Name, b0.awsConfig.Region)
-	defer deleteS3Bucket(ctx, t, b0.s3Client, bucket0Name)
+	defer deleteS3Bucket(ctx, t, b0.s3Client, bucket0Name, b0.awsConfig.Region)
 
 	bucket1Name := fmt.Sprintf("terraform-remote-s3-test-%x-1", time.Now().Unix())
 	b1 := backend.TestBackendConfig(t, New(), backend.TestWrapConfig(map[string]interface{}{
@@ -1458,7 +2321,7 @@ func TestKeyEnv(t *testing.T) {
 	})).(*Backend)
 
 	createS3Bucket(ctx, t, b1.s3Client, bucket1Name, b1.awsConfig.Region)
-	defer deleteS3Bucket(ctx, t, b1.s3Client, bucket1Name)
+	defer deleteS3Bucket(ctx, t, b1.s3Client, bucket1Name, b1.awsConfig.Region)
 
 	bucket2Name := fmt.Sprintf("terraform-remote-s3-test-%x-2", time.Now().Unix())
 	b2 := backend.TestBackendConfig(t, New(), backend.TestWrapConfig(map[string]interface{}{
@@ -1468,7 +2331,7 @@ func TestKeyEnv(t *testing.T) {
 	})).(*Backend)
 
 	createS3Bucket(ctx, t, b2.s3Client, bucket2Name, b2.awsConfig.Region)
-	defer deleteS3Bucket(ctx, t, b2.s3Client, bucket2Name)
+	defer deleteS3Bucket(ctx, t, b2.s3Client, bucket2Name, b2.awsConfig.Region)
 
 	if err := testGetWorkspaceForKey(b0, "some/paths/tfstate", ""); err != nil {
 		t.Fatal(err)
@@ -1623,8 +2486,12 @@ func TestAssumeRole_PrepareConfigValidation(t *testing.T) {
 			},
 		},
 
-		// NOT SUPPORTED by `aws-sdk-go-base/v1`
-		// "source_identity"
+		"source_identity": {
+			config: map[string]cty.Value{
+				"role_arn":        cty.StringVal("arn:aws:iam::123456789012:role/testrole"),
+				"source_identity": cty.StringVal("source-identity"),
+			},
+		},
 
 		"with tags": {
 			config: map[string]cty.Value{
@@ -1647,7 +2514,7 @@ func TestAssumeRole_PrepareConfigValidation(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			schema := assumeRoleFullSchema()
+			schema := assumeRoleSchema.Attributes
 			vals := make(map[string]cty.Value, len(schema))
 			for name, attrSchema := range schema {
 				if val, ok := tc.config[name]; ok {
@@ -1658,10 +2525,98 @@ func TestAssumeRole_PrepareConfigValidation(t *testing.T) {
 			}
 			config := cty.ObjectVal(vals)
 
-			diags := prepareAssumeRoleConfig(config, path)
+			var diags tfdiags.Diagnostics
+			validateNestedAttribute(assumeRoleSchema, config, path, &diags)
 
 			if diff := cmp.Diff(diags, tc.expectedDiags, cmp.Comparer(diagnosticComparer)); diff != "" {
 				t.Errorf("unexpected diagnostics difference: %s", diff)
+			}
+		})
+	}
+}
+
+// TestBackend_CoerceValue verifies a cty.Object can be coerced into
+// an s3 backend Block
+//
+// This serves as a smoke test for use of the terraform_remote_state
+// data source with the s3 backend, replicating the the process that
+// data source uses. The returned value is ignored as the object is
+// large (representing the entire s3 backend schema) and the focus of
+// this test is early detection of coercion failures.
+func TestBackend_CoerceValue(t *testing.T) {
+	testCases := map[string]struct {
+		Input   cty.Value
+		WantErr string
+	}{
+		"basic": {
+			Input: cty.ObjectVal(map[string]cty.Value{
+				"bucket": cty.StringVal("test"),
+				"key":    cty.StringVal("test"),
+			}),
+		},
+		"missing bucket": {
+			Input: cty.ObjectVal(map[string]cty.Value{
+				"key": cty.StringVal("test"),
+			}),
+			WantErr: `attribute "bucket" is required`,
+		},
+		"missing key": {
+			Input: cty.ObjectVal(map[string]cty.Value{
+				"bucket": cty.StringVal("test"),
+			}),
+			WantErr: `attribute "key" is required`,
+		},
+		"assume_role": {
+			Input: cty.ObjectVal(map[string]cty.Value{
+				"bucket": cty.StringVal("test"),
+				"key":    cty.StringVal("test"),
+				"assume_role": cty.ObjectVal(map[string]cty.Value{
+					"role_arn": cty.StringVal("test"),
+				}),
+			}),
+		},
+		"assume_role missing role_arn": {
+			Input: cty.ObjectVal(map[string]cty.Value{
+				"bucket":      cty.StringVal("test"),
+				"key":         cty.StringVal("test"),
+				"assume_role": cty.ObjectVal(map[string]cty.Value{}),
+			}),
+			WantErr: `.assume_role: attribute "role_arn" is required`,
+		},
+		"assume_role_with_web_identity": {
+			Input: cty.ObjectVal(map[string]cty.Value{
+				"bucket": cty.StringVal("test"),
+				"key":    cty.StringVal("test"),
+				"assume_role_with_web_identity": cty.ObjectVal(map[string]cty.Value{
+					"role_arn": cty.StringVal("test"),
+				}),
+			}),
+		},
+		"assume_role_with_web_identity missing role_arn": {
+			Input: cty.ObjectVal(map[string]cty.Value{
+				"bucket":                        cty.StringVal("test"),
+				"key":                           cty.StringVal("test"),
+				"assume_role_with_web_identity": cty.ObjectVal(map[string]cty.Value{}),
+			}),
+			WantErr: `.assume_role_with_web_identity: attribute "role_arn" is required`,
+		},
+	}
+
+	for name, test := range testCases {
+		t.Run(name, func(t *testing.T) {
+			b := Backend{}
+			// Skip checking the returned cty.Value as this object will be large.
+			_, gotErrObj := b.ConfigSchema().CoerceValue(test.Input)
+
+			if gotErrObj == nil {
+				if test.WantErr != "" {
+					t.Fatalf("coersion succeeded; want error: %q", test.WantErr)
+				}
+			} else {
+				gotErr := tfdiags.FormatError(gotErrObj)
+				if gotErr != test.WantErr {
+					t.Fatalf("wrong error\ngot:  %s\nwant: %s", gotErr, test.WantErr)
+				}
 			}
 		})
 	}
@@ -1686,44 +2641,109 @@ func checkStateList(b backend.Backend, expected []string) error {
 	return nil
 }
 
-func createS3Bucket(ctx context.Context, t *testing.T, s3Client *s3.Client, bucketName, region string) {
+type createS3BucketOptions struct {
+	versioning     bool
+	objectLockMode s3types.ObjectLockRetentionMode
+}
+
+type createS3BucketOptionsFunc func(*createS3BucketOptions)
+
+func createS3Bucket(ctx context.Context, t *testing.T, s3Client *s3.Client, bucketName, region string, optFns ...createS3BucketOptionsFunc) {
+	t.Helper()
+
+	var opts createS3BucketOptions
+	for _, f := range optFns {
+		f(&opts)
+	}
+
 	createBucketReq := &s3.CreateBucketInput{
-		Bucket: &bucketName,
+		Bucket: aws.String(bucketName),
 	}
 	if region != "us-east-1" {
 		createBucketReq.CreateBucketConfiguration = &s3types.CreateBucketConfiguration{
 			LocationConstraint: s3types.BucketLocationConstraint(region),
 		}
 	}
+	if opts.objectLockMode != "" {
+		createBucketReq.ObjectLockEnabledForBucket = aws.Bool(true)
+	}
 
 	// Be clear about what we're doing in case the user needs to clean
 	// this up later.
 	t.Logf("creating S3 bucket %s in %s", bucketName, region)
-	_, err := s3Client.CreateBucket(ctx, createBucketReq)
+	_, err := s3Client.CreateBucket(ctx, createBucketReq, s3WithRegion(region))
 	if err != nil {
 		t.Fatal("failed to create test S3 bucket:", err)
 	}
+
+	if opts.versioning {
+		_, err := s3Client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+			Bucket: aws.String(bucketName),
+			VersioningConfiguration: &s3types.VersioningConfiguration{
+				Status: s3types.BucketVersioningStatusEnabled,
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed enabling versioning: %s", err)
+		}
+	}
+
+	if opts.objectLockMode != "" {
+		_, err = s3Client.PutObjectLockConfiguration(ctx, &s3.PutObjectLockConfigurationInput{
+			Bucket: aws.String(bucketName),
+			ObjectLockConfiguration: &s3types.ObjectLockConfiguration{
+				ObjectLockEnabled: s3types.ObjectLockEnabledEnabled,
+				Rule: &s3types.ObjectLockRule{
+					DefaultRetention: &s3types.DefaultRetention{
+						Days: aws.Int32(1),
+						Mode: opts.objectLockMode,
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("failed enabling object locking: %s", err)
+		}
+	}
 }
 
-func deleteS3Bucket(ctx context.Context, t *testing.T, s3Client *s3.Client, bucketName string) {
+func s3BucketWithVersioning(opts *createS3BucketOptions) {
+	opts.versioning = true
+}
+
+func s3BucketWithObjectLock(mode s3types.ObjectLockRetentionMode) createS3BucketOptionsFunc {
+	return func(opts *createS3BucketOptions) {
+		opts.objectLockMode = mode
+	}
+}
+
+func deleteS3Bucket(ctx context.Context, t *testing.T, s3Client *s3.Client, bucketName, region string) {
+	t.Helper()
+
 	warning := "WARNING: Failed to delete the test S3 bucket. It may have been left in your AWS account and may incur storage charges. (error was %s)"
 
 	// first we have to get rid of the env objects, or we can't delete the bucket
-	resp, err := s3Client.ListObjects(ctx, &s3.ListObjectsInput{Bucket: &bucketName})
+	resp, err := s3Client.ListObjects(ctx, &s3.ListObjectsInput{Bucket: &bucketName}, s3WithRegion(region))
 	if err != nil {
 		t.Logf(warning, err)
 		return
 	}
 	for _, obj := range resp.Contents {
-		if _, err := s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &bucketName, Key: obj.Key}); err != nil {
+		if _, err := s3Client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &bucketName, Key: obj.Key}, s3WithRegion(region)); err != nil {
 			// this will need cleanup no matter what, so just warn and exit
 			t.Logf(warning, err)
 			return
 		}
 	}
 
-	if _, err := s3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: &bucketName}); err != nil {
+	if _, err := s3Client.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: &bucketName}, s3WithRegion(region)); err != nil {
 		t.Logf(warning, err)
+	}
+}
+
+func s3WithRegion(region string) func(o *s3.Options) {
+	return func(o *s3.Options) {
+		o.Region = region
 	}
 }
 
@@ -1930,4 +2950,100 @@ func testBackendConfigDiags(t *testing.T, b backend.Backend, c hcl.Body) (backen
 	confDiags := b.Configure(obj)
 
 	return b, diags.Append(confDiags)
+}
+
+func addRetrieveEndpointURLMiddleware(t *testing.T, endpoint *string) func(*middleware.Stack) error {
+	return func(stack *middleware.Stack) error {
+		return stack.Finalize.Add(
+			retrieveEndpointURLMiddleware(t, endpoint),
+			middleware.After,
+		)
+	}
+}
+
+func retrieveEndpointURLMiddleware(t *testing.T, endpoint *string) middleware.FinalizeMiddleware {
+	return middleware.FinalizeMiddlewareFunc(
+		"Test: Retrieve Endpoint",
+		func(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (middleware.FinalizeOutput, middleware.Metadata, error) {
+			t.Helper()
+
+			request, ok := in.Request.(*smithyhttp.Request)
+			if !ok {
+				t.Fatalf("Expected *github.com/aws/smithy-go/transport/http.Request, got %s", fullTypeName(in.Request))
+			}
+
+			url := request.URL
+			url.RawQuery = ""
+
+			*endpoint = url.String()
+
+			return next.HandleFinalize(ctx, in)
+		})
+}
+
+var errCancelOperation = fmt.Errorf("Test: Cancelling request")
+
+func addCancelRequestMiddleware() func(*middleware.Stack) error {
+	return func(stack *middleware.Stack) error {
+		return stack.Finalize.Add(
+			cancelRequestMiddleware(),
+			middleware.After,
+		)
+	}
+}
+
+// cancelRequestMiddleware creates a Smithy middleware that intercepts the request before sending and cancels it
+func cancelRequestMiddleware() middleware.FinalizeMiddleware {
+	return middleware.FinalizeMiddlewareFunc(
+		"Test: Cancel Requests",
+		func(_ context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (middleware.FinalizeOutput, middleware.Metadata, error) {
+			return middleware.FinalizeOutput{}, middleware.Metadata{}, errCancelOperation
+		})
+}
+
+func fullTypeName(i interface{}) string {
+	return fullValueTypeName(reflect.ValueOf(i))
+}
+
+func fullValueTypeName(v reflect.Value) string {
+	if v.Kind() == reflect.Ptr {
+		return "*" + fullValueTypeName(reflect.Indirect(v))
+	}
+
+	requestType := v.Type()
+	return fmt.Sprintf("%s.%s", requestType.PkgPath(), requestType.Name())
+}
+
+func defaultEndpointDynamo(region string) string {
+	r := dynamodb.NewDefaultEndpointResolverV2()
+
+	ep, err := r.ResolveEndpoint(context.TODO(), dynamodb.EndpointParameters{
+		Region: aws.String(region),
+	})
+	if err != nil {
+		return err.Error()
+	}
+
+	if ep.URI.Path == "" {
+		ep.URI.Path = "/"
+	}
+
+	return ep.URI.String()
+}
+
+func defaultEndpointS3(region string) string {
+	r := s3.NewDefaultEndpointResolverV2()
+
+	ep, err := r.ResolveEndpoint(context.TODO(), s3.EndpointParameters{
+		Region: aws.String(region),
+	})
+	if err != nil {
+		return err.Error()
+	}
+
+	if ep.URI.Path == "" {
+		ep.URI.Path = "/"
+	}
+
+	return ep.URI.String()
 }
