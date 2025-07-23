@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hashicorp/cli"
 	"github.com/hashicorp/terraform/internal/tfdiags"
-	"github.com/mitchellh/cli"
 	"github.com/posener/complete"
 )
 
@@ -59,7 +59,7 @@ func (c *WorkspaceSelectCommand) Run(args []string) int {
 
 	// Load the backend
 	b, backendDiags := c.Backend(&BackendOpts{
-		Config: backendConfig,
+		BackendConfig: backendConfig,
 	})
 	diags = diags.Append(backendDiags)
 	if backendDiags.HasErrors() {

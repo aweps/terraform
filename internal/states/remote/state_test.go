@@ -4,6 +4,7 @@
 package remote
 
 import (
+	"context"
 	"log"
 	"sync"
 	"testing"
@@ -128,8 +129,9 @@ func TestStatePersist(t *testing.T) {
 										"attributes_flat": map[string]interface{}{
 											"filename": "file.txt",
 										},
-										"schema_version":       0.0,
-										"sensitive_attributes": []interface{}{},
+										"identity_schema_version": 0.0,
+										"schema_version":          0.0,
+										"sensitive_attributes":    []interface{}{},
 									},
 								},
 								"mode":     "managed",
@@ -166,8 +168,9 @@ func TestStatePersist(t *testing.T) {
 										"attributes_flat": map[string]interface{}{
 											"filename": "file.txt",
 										},
-										"schema_version":       0.0,
-										"sensitive_attributes": []interface{}{},
+										"identity_schema_version": 0.0,
+										"schema_version":          0.0,
+										"sensitive_attributes":    []interface{}{},
 									},
 								},
 								"mode":     "managed",
@@ -408,7 +411,7 @@ func TestState_GetRootOutputValues(t *testing.T) {
 		},
 	}
 
-	outputs, err := mgr.GetRootOutputValues()
+	outputs, err := mgr.GetRootOutputValues(context.Background())
 	if err != nil {
 		t.Errorf("Expected GetRootOutputValues to not return an error, but it returned %v", err)
 	}

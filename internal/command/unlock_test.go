@@ -7,10 +7,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/hashicorp/terraform/internal/backend/remote-state/inmem"
-	"github.com/mitchellh/cli"
+	"github.com/hashicorp/cli"
 
-	legacy "github.com/hashicorp/terraform/internal/legacy/terraform"
+	"github.com/hashicorp/terraform/internal/backend/remote-state/inmem"
+	"github.com/hashicorp/terraform/internal/command/workdir"
 )
 
 // Since we can't unlock a local state file, just test that calling unlock
@@ -18,17 +18,17 @@ import (
 func TestUnlock(t *testing.T) {
 	td := t.TempDir()
 	os.MkdirAll(td, 0755)
-	defer testChdir(t, td)()
+	t.Chdir(td)
 
 	// Write the legacy state
 	statePath := DefaultStateFilename
 	{
-		f, err := os.Create(statePath)
+		emptyStateFile := workdir.NewBackendStateFile()
+		emptyStateFileRaw, err := workdir.EncodeBackendStateFile(emptyStateFile)
 		if err != nil {
-			t.Fatalf("err: %s", err)
+			t.Fatal(err)
 		}
-		err = legacy.WriteState(legacy.NewState(), f)
-		f.Close()
+		err = os.WriteFile(statePath, emptyStateFileRaw, os.ModePerm)
 		if err != nil {
 			t.Fatalf("err: %s", err)
 		}
@@ -70,7 +70,7 @@ func TestUnlock_inmemBackend(t *testing.T) {
 	// Create a temporary working directory that is empty
 	td := t.TempDir()
 	testCopyDir(t, testFixturePath("backend-inmem-locked"), td)
-	defer testChdir(t, td)()
+	t.Chdir(td)
 	defer inmem.Reset()
 
 	// init backend

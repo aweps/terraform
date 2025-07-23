@@ -9,7 +9,7 @@ import (
 	"io"
 	"log"
 
-	"github.com/hashicorp/terraform/internal/backend"
+	"github.com/hashicorp/terraform/internal/backend/backendrun"
 	"github.com/hashicorp/terraform/internal/genconfig"
 	"github.com/hashicorp/terraform/internal/logging"
 	"github.com/hashicorp/terraform/internal/plans"
@@ -23,8 +23,8 @@ import (
 func (b *Local) opPlan(
 	stopCtx context.Context,
 	cancelCtx context.Context,
-	op *backend.Operation,
-	runningOp *backend.RunningOperation) {
+	op *backendrun.Operation,
+	runningOp *backendrun.RunningOperation) {
 
 	log.Printf("[INFO] backend/local: starting Plan operation")
 
@@ -76,7 +76,7 @@ func (b *Local) opPlan(
 		b.ContextOpts = new(terraform.ContextOpts)
 	}
 
-	// Get our context
+	// Set up backend and get our context
 	lr, configSnap, opState, ctxDiags := b.localRun(op)
 	diags = diags.Append(ctxDiags)
 	if ctxDiags.HasErrors() {
@@ -89,7 +89,7 @@ func (b *Local) opPlan(
 		diags := op.StateLocker.Unlock()
 		if diags.HasErrors() {
 			op.View.Diagnostics(diags)
-			runningOp.Result = backend.OperationFailure
+			runningOp.Result = backendrun.OperationFailure
 		}
 	}()
 
@@ -112,7 +112,7 @@ func (b *Local) opPlan(
 		// If we get in here then the operation was cancelled, which is always
 		// considered to be a failure.
 		log.Printf("[INFO] backend/local: plan operation was force-cancelled by interrupt")
-		runningOp.Result = backend.OperationFailure
+		runningOp.Result = backendrun.OperationFailure
 		return
 	}
 	log.Printf("[INFO] backend/local: plan operation completed")
@@ -120,7 +120,9 @@ func (b *Local) opPlan(
 	// NOTE: We intentionally don't stop here on errors because we always want
 	// to try to present a partial plan report and, if the user chose to,
 	// generate a partial saved plan file for external analysis.
-	diags = diags.Append(planDiags)
+	// Plan() may produce some diagnostic warnings which were already
+	// produced when setting up context above, so we deduplicate them here.
+	diags = diags.AppendWithoutDuplicates(planDiags...)
 
 	// Even if there are errors we need to handle anything that may be
 	// contained within the plan, so only exit if there is no data at all.
@@ -131,7 +133,7 @@ func (b *Local) opPlan(
 	}
 
 	// Record whether this plan includes any side-effects that could be applied.
-	runningOp.PlanEmpty = !plan.CanApply()
+	runningOp.PlanEmpty = !plan.Applyable
 
 	// Save the plan to disk
 	if path := op.PlanOutPath; path != "" {
@@ -236,6 +238,21 @@ func maybeWriteGeneratedConfig(plan *plans.Plan, out string) (wroteConfig bool, 
 
 			var moreDiags tfdiags.Diagnostics
 			writer, wroteConfig, moreDiags = change.MaybeWriteConfig(writer, out)
+			if moreDiags.HasErrors() {
+				return false, diags.Append(moreDiags)
+			}
+		}
+
+		// When running a list operation, the results are stored as queries and the
+		// resource changes above are not populated.
+		for _, q := range plan.Changes.Queries {
+			change := genconfig.Change{
+				Addr:            q.Addr.String(),
+				GeneratedConfig: q.Generated.String(),
+			}
+
+			var moreDiags tfdiags.Diagnostics
+			writer, _, moreDiags = change.MaybeWriteConfig(writer, out)
 			if moreDiags.HasErrors() {
 				return false, diags.Append(moreDiags)
 			}

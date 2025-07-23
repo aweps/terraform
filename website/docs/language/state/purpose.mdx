@@ -7,6 +7,12 @@ description: >-
   large infrastructures.
 ---
 
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+> [!IMPORTANT]  
+> **Documentation Update:** Product documentation previously located in `/website` has moved to the [`hashicorp/web-unified-docs`](https://github.com/hashicorp/web-unified-docs) repository, where all product documentation is now centralized. Please make contributions directly to `web-unified-docs`, since changes to `/website` in this repository will not appear on developer.hashicorp.com.
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+
+
 # Purpose of Terraform State
 
 State is a necessary requirement for Terraform to function. It is often
@@ -59,7 +65,7 @@ of dependencies within the state. Now Terraform can still determine the correct
 order for destruction from the state when you delete one or more items from
 the configuration.
 
-One way to avoid this would be for Terraform to know a required ordering
+Terraform could take another approach to dependency order by using an underlying hierarchy of order
 between resource types. For example, Terraform could know that servers must be
 deleted before the subnets they are a part of. The complexity for this approach
 quickly explodes, however: in addition to Terraform having to understand the

@@ -8,11 +8,11 @@ import (
 	"os"
 	"os/signal"
 
+	"github.com/hashicorp/cli"
 	"github.com/hashicorp/go-plugin"
 	svchost "github.com/hashicorp/terraform-svchost"
 	"github.com/hashicorp/terraform-svchost/auth"
 	"github.com/hashicorp/terraform-svchost/disco"
-	"github.com/mitchellh/cli"
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/command"
@@ -91,7 +91,7 @@ func initCommands(
 		View:       views.NewView(streams).SetRunningInAutomation(inAutomation),
 
 		Color:            true,
-		GlobalPluginDirs: globalPluginDirs(),
+		GlobalPluginDirs: cliconfig.GlobalPluginDirs(),
 		Ui:               Ui,
 
 		Services:        services,
@@ -228,6 +228,12 @@ func initCommands(
 			}, nil
 		},
 
+		"modules": func() (cli.Command, error) {
+			return &command.ModulesCommand{
+				Meta: meta,
+			}, nil
+		},
+
 		"output": func() (cli.Command, error) {
 			return &command.OutputCommand{
 				Meta: meta,
@@ -275,6 +281,17 @@ func initCommands(
 				Meta: meta,
 			}, nil
 		},
+
+		// "rpcapi" is handled a bit differently because the whole point of
+		// this interface is to bypass the CLI layer so wrapping automation can
+		// get as-direct-as-possible access to Terraform Core functionality,
+		// without interference from behaviors that are intended for CLI
+		// end-user convenience. We bypass the "command" package entirely
+		// for this command in particular.
+		"rpcapi": rpcapi.CLICommandFactory(rpcapi.CommandFactoryOpts{
+			ExperimentsAllowed: meta.AllowExperimentalFeatures,
+			ShutdownCh:         meta.ShutdownCh,
+		}),
 
 		"show": func() (cli.Command, error) {
 			return &command.ShowCommand{
@@ -366,6 +383,12 @@ func initCommands(
 			}, nil
 		},
 
+		"state identities": func() (cli.Command, error) {
+			return &command.StateIdentitiesCommand{
+				Meta: meta,
+			}, nil
+		},
+
 		"state rm": func() (cli.Command, error) {
 			return &command.StateRmCommand{
 				StateMeta: command.StateMeta{
@@ -416,16 +439,17 @@ func initCommands(
 			}, nil
 		}
 
-		// "rpcapi" is handled a bit differently because the whole point of
-		// this interface is to bypass the CLI layer so wrapping automation can
-		// get as-direct-as-possible access to Terraform Core functionality,
-		// without interference from behaviors that are intended for CLI
-		// end-user convenience. We bypass the "command" package entirely
-		// for this command in particular.
-		Commands["rpcapi"] = rpcapi.CLICommandFactory(rpcapi.CommandFactoryOpts{
-			ExperimentsAllowed: meta.AllowExperimentalFeatures,
-			ShutdownCh:         meta.ShutdownCh,
-		})
+		Commands["query"] = func() (cli.Command, error) {
+			return &command.QueryCommand{
+				Meta: meta,
+			}, nil
+		}
+
+		Commands["stacks"] = func() (cli.Command, error) {
+			return &command.StacksCommand{
+				Meta: meta,
+			}, nil
+		}
 	}
 
 	PrimaryCommands = []string{
@@ -463,6 +487,6 @@ func makeShutdownCh() <-chan struct{} {
 }
 
 func credentialsSource(config *cliconfig.Config) (auth.CredentialsSource, error) {
-	helperPlugins := pluginDiscovery.FindPlugins("credentials", globalPluginDirs())
+	helperPlugins := pluginDiscovery.FindPlugins("credentials", cliconfig.GlobalPluginDirs())
 	return config.CredentialsSource(helperPlugins)
 }

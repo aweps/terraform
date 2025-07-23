@@ -43,6 +43,8 @@ type JSONLog struct {
 	TestFatalInterrupt *viewsjson.TestFatalInterrupt `json:"test_interrupt,omitempty"`
 	TestState          *State                        `json:"test_state,omitempty"`
 	TestPlan           *Plan                         `json:"test_plan,omitempty"`
+
+	ListQueryResult *viewsjson.QueryResult `json:"list_resource_found,omitempty"`
 }
 
 const (
@@ -62,8 +64,12 @@ const (
 	LogResourceDrift     JSONLogType = "resource_drift"
 	LogVersion           JSONLogType = "version"
 
-	// Test Messages
+	// Ephemeral operation messages
+	LogEphemeralOpStart    JSONLogType = "ephemeral_op_start"
+	LogEphemeralOpComplete JSONLogType = "ephemeral_op_complete"
+	LogEphemeralOpErrored  JSONLogType = "ephemeral_op_errored"
 
+	// Test Messages
 	LogTestAbstract  JSONLogType = "test_abstract"
 	LogTestFile      JSONLogType = "test_file"
 	LogTestRun       JSONLogType = "test_run"
@@ -74,6 +80,10 @@ const (
 	LogTestInterrupt JSONLogType = "test_interrupt"
 	LogTestStatus    JSONLogType = "test_status"
 	LogTestRetry     JSONLogType = "test_retry"
+
+	// Query Messages
+	LogListStart         JSONLogType = "list_start"
+	LogListResourceFound JSONLogType = "list_resource_found"
 )
 
 func incompatibleVersions(localVersion, remoteVersion string) bool {
@@ -146,16 +156,18 @@ func (renderer Renderer) RenderLog(log *JSONLog) error {
 		LogProvisionComplete,
 		LogProvisionErrored,
 		LogApplyErrored,
+		LogEphemeralOpErrored,
 		LogTestAbstract,
 		LogTestStatus,
 		LogTestRetry,
 		LogTestPlan,
 		LogTestState,
-		LogTestInterrupt:
+		LogTestInterrupt,
+		LogListStart:
 		// We won't display these types of logs
 		return nil
 
-	case LogApplyStart, LogApplyComplete, LogRefreshStart, LogProvisionStart, LogResourceDrift:
+	case LogApplyStart, LogApplyComplete, LogRefreshStart, LogProvisionStart, LogResourceDrift, LogEphemeralOpStart, LogEphemeralOpComplete:
 		msg := fmt.Sprintf(renderer.Colorize.Color("[bold]%s[reset]"), log.Message)
 		renderer.Streams.Println(msg)
 
@@ -284,6 +296,15 @@ func (renderer Renderer) RenderLog(log *JSONLog) error {
 				renderer.Streams.Eprintf(" - %s\n", resource.Instance)
 			}
 		}
+
+	case LogListResourceFound:
+		// TODO: revisit once the cloud backend support list runs
+		// We will need to transform the identity to a more human-readable form
+		result := log.ListQueryResult
+		renderer.Streams.Printf("%s\t%s\t%s\n",
+			result.Address,
+			result.Identity,
+			result.DisplayName)
 
 	default:
 		// If the log type is not a known log type, we will just print the log message

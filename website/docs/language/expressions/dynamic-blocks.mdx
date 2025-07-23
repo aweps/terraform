@@ -5,6 +5,12 @@ description: >-
   Learn to configure dynamic blocks and understand their behavior.
 ---
 
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+> [!IMPORTANT]  
+> **Documentation Update:** Product documentation previously located in `/website` has moved to the [`hashicorp/web-unified-docs`](https://github.com/hashicorp/web-unified-docs) repository, where all product documentation is now centralized. Please make contributions directly to `web-unified-docs`, since changes to `/website` in this repository will not appear on developer.hashicorp.com.
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+
+
 # `dynamic` Blocks
 
 Within top-level block constructs like resources, expressions can usually be
@@ -30,7 +36,7 @@ special `dynamic` block type, which is supported inside `resource`, `data`,
 ```hcl
 resource "aws_elastic_beanstalk_environment" "tfenvtest" {
   name                = "tf-test-name"
-  application         = "${aws_elastic_beanstalk_application.tftest.name}"
+  application         = aws_elastic_beanstalk_application.tftest.name
   solution_stack_name = "64bit Amazon Linux 2018.03 v2.11.4 running Go 1.12.6"
 
   dynamic "setting" {

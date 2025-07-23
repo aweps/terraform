@@ -6,7 +6,7 @@ package planfile
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
+	"slices"
 	"time"
 
 	"github.com/zclconf/go-cty/cty"
@@ -14,11 +14,14 @@ import (
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/checks"
+	"github.com/hashicorp/terraform/internal/collections"
+	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/lang/globalref"
-	"github.com/hashicorp/terraform/internal/lang/marks"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/plans/planproto"
+	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/states"
+	"github.com/hashicorp/terraform/internal/tfdiags"
 	"github.com/hashicorp/terraform/version"
 )
 
@@ -37,7 +40,7 @@ const tfplanFilename = "tfplan"
 // a plan file, which is stored in a special file in the archive called
 // "tfplan".
 func readTfplan(r io.Reader) (*plans.Plan, error) {
-	src, err := ioutil.ReadAll(r)
+	src, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
@@ -58,25 +61,23 @@ func readTfplan(r io.Reader) (*plans.Plan, error) {
 
 	plan := &plans.Plan{
 		VariableValues: map[string]plans.DynamicValue{},
-		Changes: &plans.Changes{
+		Changes: &plans.ChangesSrc{
 			Outputs:   []*plans.OutputChangeSrc{},
 			Resources: []*plans.ResourceInstanceChangeSrc{},
 		},
-		DriftedResources: []*plans.ResourceInstanceChangeSrc{},
-		Checks:           &states.CheckResults{},
+		DriftedResources:  []*plans.ResourceInstanceChangeSrc{},
+		DeferredResources: []*plans.DeferredResourceInstanceChangeSrc{},
+		Checks:            &states.CheckResults{},
+		ActionInvocations: []*plans.ActionInvocationInstanceSrc{},
 	}
 
+	plan.Applyable = rawPlan.Applyable
+	plan.Complete = rawPlan.Complete
 	plan.Errored = rawPlan.Errored
 
-	switch rawPlan.UiMode {
-	case planproto.Mode_NORMAL:
-		plan.UIMode = plans.NormalMode
-	case planproto.Mode_DESTROY:
-		plan.UIMode = plans.DestroyMode
-	case planproto.Mode_REFRESH_ONLY:
-		plan.UIMode = plans.RefreshOnlyMode
-	default:
-		return nil, fmt.Errorf("plan has invalid mode %s", rawPlan.UiMode)
+	plan.UIMode, err = planproto.FromMode(rawPlan.UiMode)
+	if err != nil {
+		return nil, err
 	}
 
 	for _, rawOC := range rawPlan.OutputChanges {
@@ -96,98 +97,14 @@ func readTfplan(r io.Reader) (*plans.Plan, error) {
 		})
 	}
 
-	plan.Checks.ConfigResults = addrs.MakeMap[addrs.ConfigCheckable, *states.CheckResultAggregate]()
-	for _, rawCRs := range rawPlan.CheckResults {
-		aggr := &states.CheckResultAggregate{}
-		switch rawCRs.Status {
-		case planproto.CheckResults_UNKNOWN:
-			aggr.Status = checks.StatusUnknown
-		case planproto.CheckResults_PASS:
-			aggr.Status = checks.StatusPass
-		case planproto.CheckResults_FAIL:
-			aggr.Status = checks.StatusFail
-		case planproto.CheckResults_ERROR:
-			aggr.Status = checks.StatusError
-		default:
-			return nil, fmt.Errorf("aggregate check results for %s have unsupported status %#v", rawCRs.ConfigAddr, rawCRs.Status)
-		}
-
-		var objKind addrs.CheckableKind
-		switch rawCRs.Kind {
-		case planproto.CheckResults_RESOURCE:
-			objKind = addrs.CheckableResource
-		case planproto.CheckResults_OUTPUT_VALUE:
-			objKind = addrs.CheckableOutputValue
-		case planproto.CheckResults_CHECK:
-			objKind = addrs.CheckableCheck
-		case planproto.CheckResults_INPUT_VARIABLE:
-			objKind = addrs.CheckableInputVariable
-		default:
-			return nil, fmt.Errorf("aggregate check results for %s have unsupported object kind %s", rawCRs.ConfigAddr, objKind)
-		}
-
-		// Some trickiness here: we only have an address parser for
-		// addrs.Checkable and not for addrs.ConfigCheckable, but that's okay
-		// because once we have an addrs.Checkable we can always derive an
-		// addrs.ConfigCheckable from it, and a ConfigCheckable should always
-		// be the same syntax as a Checkable with no index information and
-		// thus we can reuse the same parser for both here.
-		configAddrProxy, diags := addrs.ParseCheckableStr(objKind, rawCRs.ConfigAddr)
-		if diags.HasErrors() {
-			return nil, diags.Err()
-		}
-		configAddr := configAddrProxy.ConfigCheckable()
-		if configAddr.String() != configAddrProxy.String() {
-			// This is how we catch if the config address included index
-			// information that would be allowed in a Checkable but not
-			// in a ConfigCheckable.
-			return nil, fmt.Errorf("invalid checkable config address %s", rawCRs.ConfigAddr)
-		}
-
-		aggr.ObjectResults = addrs.MakeMap[addrs.Checkable, *states.CheckResultObject]()
-		for _, rawCR := range rawCRs.Objects {
-			objectAddr, diags := addrs.ParseCheckableStr(objKind, rawCR.ObjectAddr)
-			if diags.HasErrors() {
-				return nil, diags.Err()
-			}
-			if !addrs.Equivalent(objectAddr.ConfigCheckable(), configAddr) {
-				return nil, fmt.Errorf("checkable object %s should not be grouped under %s", objectAddr, configAddr)
-			}
-
-			obj := &states.CheckResultObject{
-				FailureMessages: rawCR.FailureMessages,
-			}
-			switch rawCR.Status {
-			case planproto.CheckResults_UNKNOWN:
-				obj.Status = checks.StatusUnknown
-			case planproto.CheckResults_PASS:
-				obj.Status = checks.StatusPass
-			case planproto.CheckResults_FAIL:
-				obj.Status = checks.StatusFail
-			case planproto.CheckResults_ERROR:
-				obj.Status = checks.StatusError
-			default:
-				return nil, fmt.Errorf("object check results for %s has unsupported status %#v", rawCR.ObjectAddr, rawCR.Status)
-			}
-
-			aggr.ObjectResults.Put(objectAddr, obj)
-		}
-		// If we ended up with no elements in the map then we'll just nil it,
-		// primarily just to make life easier for our round-trip tests.
-		if aggr.ObjectResults.Len() == 0 {
-			aggr.ObjectResults.Elems = nil
-		}
-
-		plan.Checks.ConfigResults.Put(configAddr, aggr)
+	checkResults, err := CheckResultsFromPlanProto(rawPlan.CheckResults)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode check results: %s", err)
 	}
-	// If we ended up with no elements in the map then we'll just nil it,
-	// primarily just to make life easier for our round-trip tests.
-	if plan.Checks.ConfigResults.Len() == 0 {
-		plan.Checks.ConfigResults.Elems = nil
-	}
+	plan.Checks = checkResults
 
 	for _, rawRC := range rawPlan.ResourceChanges {
-		change, err := resourceChangeFromTfplan(rawRC)
+		change, err := resourceChangeFromTfplan(rawRC, addrs.ParseAbsResourceInstanceStr)
 		if err != nil {
 			// errors from resourceChangeFromTfplan already include context
 			return nil, err
@@ -197,13 +114,22 @@ func readTfplan(r io.Reader) (*plans.Plan, error) {
 	}
 
 	for _, rawRC := range rawPlan.ResourceDrift {
-		change, err := resourceChangeFromTfplan(rawRC)
+		change, err := resourceChangeFromTfplan(rawRC, addrs.ParseAbsResourceInstanceStr)
 		if err != nil {
 			// errors from resourceChangeFromTfplan already include context
 			return nil, err
 		}
 
 		plan.DriftedResources = append(plan.DriftedResources, change)
+	}
+
+	for _, rawDC := range rawPlan.DeferredChanges {
+		change, err := deferredChangeFromTfplan(rawDC)
+		if err != nil {
+			return nil, err
+		}
+
+		plan.DeferredResources = append(plan.DeferredResources, change)
 	}
 
 	for _, rawRA := range rawPlan.RelevantAttributes {
@@ -238,9 +164,43 @@ func readTfplan(r io.Reader) (*plans.Plan, error) {
 		plan.VariableValues[name] = val
 	}
 
-	if rawBackend := rawPlan.Backend; rawBackend == nil {
-		return nil, fmt.Errorf("plan file has no backend settings; backend settings are required")
-	} else {
+	if len(rawPlan.ApplyTimeVariables) != 0 {
+		plan.ApplyTimeVariables = collections.NewSetCmp[string]()
+		for _, name := range rawPlan.ApplyTimeVariables {
+			plan.ApplyTimeVariables.Add(name)
+		}
+	}
+
+	for _, hash := range rawPlan.FunctionResults {
+		plan.FunctionResults = append(plan.FunctionResults,
+			lang.FunctionResultHash{
+				Key:    hash.Key,
+				Result: hash.Result,
+			},
+		)
+	}
+
+	for _, rawAction := range rawPlan.ActionInvocations {
+		action, err := actionInvocationFromTfplan(rawAction)
+		if err != nil {
+			// errors from actionInvocationFromTfplan already include context
+			return nil, err
+		}
+
+		plan.ActionInvocations = append(plan.ActionInvocations, action)
+	}
+
+	switch {
+	case rawPlan.Backend == nil && rawPlan.StateStore == nil:
+		// Similar validation in writeTfPlan should prevent this occurring
+		return nil,
+			fmt.Errorf("plan file has neither backend nor state_store settings; one of these settings is required. This is a bug in Terraform and should be reported.")
+	case rawPlan.Backend != nil && rawPlan.StateStore != nil:
+		// Similar validation in writeTfPlan should prevent this occurring
+		return nil,
+			fmt.Errorf("plan file contains both backend and state_store settings when only one of these settings should be set. This is a bug in Terraform and should be reported.")
+	case rawPlan.Backend != nil:
+		rawBackend := rawPlan.Backend
 		config, err := valueFromTfplan(rawBackend.Config)
 		if err != nil {
 			return nil, fmt.Errorf("plan file has invalid backend configuration: %s", err)
@@ -249,6 +209,28 @@ func readTfplan(r io.Reader) (*plans.Plan, error) {
 			Type:      rawBackend.Type,
 			Config:    config,
 			Workspace: rawBackend.Workspace,
+		}
+	case rawPlan.StateStore != nil:
+		rawStateStore := rawPlan.StateStore
+		config, err := valueFromTfplan(rawStateStore.Config)
+		if err != nil {
+			return nil, fmt.Errorf("plan file has invalid state_store configuration: %s", err)
+		}
+		provider := &plans.Provider{}
+		err = provider.SetSource(rawStateStore.Provider.Source)
+		if err != nil {
+			return nil, fmt.Errorf("plan file has invalid state_store provider source: %s", err)
+		}
+		err = provider.SetVersion(rawStateStore.Provider.Version)
+		if err != nil {
+			return nil, fmt.Errorf("plan file has invalid state_store provider version: %s", err)
+		}
+
+		plan.StateStore = plans.StateStore{
+			Type:      rawStateStore.Type,
+			Provider:  provider,
+			Config:    config,
+			Workspace: rawStateStore.Workspace,
 		}
 	}
 
@@ -265,10 +247,19 @@ func readTfplan(r io.Reader) (*plans.Plan, error) {
 // This is used by the stackplan package, which includes planproto messages
 // in its own wire format while using a different overall container.
 func ResourceChangeFromProto(rawChange *planproto.ResourceInstanceChange) (*plans.ResourceInstanceChangeSrc, error) {
-	return resourceChangeFromTfplan(rawChange)
+	return resourceChangeFromTfplan(rawChange, addrs.ParseAbsResourceInstanceStr)
 }
 
-func resourceChangeFromTfplan(rawChange *planproto.ResourceInstanceChange) (*plans.ResourceInstanceChangeSrc, error) {
+// DeferredResourceChangeFromProto decodes an isolated deferred resource
+// instance change from its representation as a protocol buffers message.
+//
+// This the same as ResourceChangeFromProto but internally allows for splat
+// addresses, which are not allowed outside deferred changes.
+func DeferredResourceChangeFromProto(rawChange *planproto.ResourceInstanceChange) (*plans.ResourceInstanceChangeSrc, error) {
+	return resourceChangeFromTfplan(rawChange, addrs.ParsePartialResourceInstanceStr)
+}
+
+func resourceChangeFromTfplan(rawChange *planproto.ResourceInstanceChange, parseAddr func(str string) (addrs.AbsResourceInstance, tfdiags.Diagnostics)) (*plans.ResourceInstanceChangeSrc, error) {
 	if rawChange == nil {
 		// Should never happen in practice, since protobuf can't represent
 		// a nil value in a list.
@@ -285,13 +276,13 @@ func resourceChangeFromTfplan(rawChange *planproto.ResourceInstanceChange) (*pla
 		return nil, fmt.Errorf("no instance address for resource instance change; perhaps this plan was created by a different version of Terraform?")
 	}
 
-	instAddr, diags := addrs.ParseAbsResourceInstanceStr(rawChange.Addr)
+	instAddr, diags := parseAddr(rawChange.Addr)
 	if diags.HasErrors() {
 		return nil, fmt.Errorf("invalid resource instance address %q: %w", rawChange.Addr, diags.Err())
 	}
 	prevRunAddr := instAddr
 	if rawChange.PrevRunAddr != "" {
-		prevRunAddr, diags = addrs.ParseAbsResourceInstanceStr(rawChange.PrevRunAddr)
+		prevRunAddr, diags = parseAddr(rawChange.PrevRunAddr)
 		if diags.HasErrors() {
 			return nil, fmt.Errorf("invalid resource instance previous run address %q: %w", rawChange.PrevRunAddr, diags.Err())
 		}
@@ -388,6 +379,10 @@ func ActionFromProto(rawAction planproto.Action) (plans.Action, error) {
 		return plans.CreateThenDelete, nil
 	case planproto.Action_DELETE_THEN_CREATE:
 		return plans.DeleteThenCreate, nil
+	case planproto.Action_FORGET:
+		return plans.Forget, nil
+	case planproto.Action_CREATE_THEN_FORGET:
+		return plans.CreateThenForget, nil
 	default:
 		return plans.NoOp, fmt.Errorf("invalid change action %s", rawAction)
 	}
@@ -431,6 +426,11 @@ func changeFromTfplan(rawChange *planproto.Change) (*plans.ChangeSrc, error) {
 	case plans.DeleteThenCreate:
 		beforeIdx = 0
 		afterIdx = 1
+	case plans.Forget:
+		beforeIdx = 0
+	case plans.CreateThenForget:
+		beforeIdx = 0
+		afterIdx = 1
 	default:
 		return nil, fmt.Errorf("invalid change action %s", rawChange.Action)
 	}
@@ -463,26 +463,50 @@ func changeFromTfplan(rawChange *planproto.Change) (*plans.ChangeSrc, error) {
 	}
 
 	if rawChange.Importing != nil {
+		var identity plans.DynamicValue
+		if rawChange.Importing.Identity != nil {
+			var err error
+			identity, err = valueFromTfplan(rawChange.Importing.Identity)
+			if err != nil {
+				return nil, fmt.Errorf("invalid \"identity\" value: %s", err)
+			}
+		}
 		ret.Importing = &plans.ImportingSrc{
-			ID: rawChange.Importing.Id,
+			ID:       rawChange.Importing.Id,
+			Unknown:  rawChange.Importing.Unknown,
+			Identity: identity,
 		}
 	}
 	ret.GeneratedConfig = rawChange.GeneratedConfig
 
-	sensitive := cty.NewValueMarks(marks.Sensitive)
-	beforeValMarks, err := pathValueMarksFromTfplan(rawChange.BeforeSensitivePaths, sensitive)
+	beforeValSensitiveAttrs, err := pathsFromTfplan(rawChange.BeforeSensitivePaths)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode before sensitive paths: %s", err)
 	}
-	afterValMarks, err := pathValueMarksFromTfplan(rawChange.AfterSensitivePaths, sensitive)
+	afterValSensitiveAttrs, err := pathsFromTfplan(rawChange.AfterSensitivePaths)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode after sensitive paths: %s", err)
 	}
-	if len(beforeValMarks) > 0 {
-		ret.BeforeValMarks = beforeValMarks
+	if len(beforeValSensitiveAttrs) > 0 {
+		ret.BeforeSensitivePaths = beforeValSensitiveAttrs
 	}
-	if len(afterValMarks) > 0 {
-		ret.AfterValMarks = afterValMarks
+	if len(afterValSensitiveAttrs) > 0 {
+		ret.AfterSensitivePaths = afterValSensitiveAttrs
+	}
+
+	if rawChange.BeforeIdentity != nil {
+		beforeIdentity, err := valueFromTfplan(rawChange.BeforeIdentity)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode before identity: %s", err)
+		}
+		ret.BeforeIdentity = beforeIdentity
+	}
+	if rawChange.AfterIdentity != nil {
+		afterIdentity, err := valueFromTfplan(rawChange.AfterIdentity)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode after identity: %s", err)
+		}
+		ret.AfterIdentity = afterIdentity
 	}
 
 	return ret, nil
@@ -494,6 +518,44 @@ func valueFromTfplan(rawV *planproto.DynamicValue) (plans.DynamicValue, error) {
 	}
 
 	return plans.DynamicValue(rawV.Msgpack), nil
+}
+
+func deferredChangeFromTfplan(dc *planproto.DeferredResourceInstanceChange) (*plans.DeferredResourceInstanceChangeSrc, error) {
+	if dc == nil {
+		return nil, fmt.Errorf("deferred change object is absent")
+	}
+
+	change, err := resourceChangeFromTfplan(dc.Change, addrs.ParsePartialResourceInstanceStr)
+	if err != nil {
+		return nil, err
+	}
+
+	reason, err := DeferredReasonFromProto(dc.Deferred.Reason)
+	if err != nil {
+		return nil, err
+	}
+
+	return &plans.DeferredResourceInstanceChangeSrc{
+		DeferredReason: reason,
+		ChangeSrc:      change,
+	}, nil
+}
+
+func DeferredReasonFromProto(reason planproto.DeferredReason) (providers.DeferredReason, error) {
+	switch reason {
+	case planproto.DeferredReason_INSTANCE_COUNT_UNKNOWN:
+		return providers.DeferredReasonInstanceCountUnknown, nil
+	case planproto.DeferredReason_RESOURCE_CONFIG_UNKNOWN:
+		return providers.DeferredReasonResourceConfigUnknown, nil
+	case planproto.DeferredReason_PROVIDER_CONFIG_UNKNOWN:
+		return providers.DeferredReasonProviderConfigUnknown, nil
+	case planproto.DeferredReason_ABSENT_PREREQ:
+		return providers.DeferredReasonAbsentPrereq, nil
+	case planproto.DeferredReason_DEFERRED_PREREQ:
+		return providers.DeferredReasonDeferredPrereq, nil
+	default:
+		return providers.DeferredReasonInvalid, fmt.Errorf("invalid deferred reason %s", reason)
+	}
 }
 
 // writeTfplan serializes the given plan into the protobuf-based format used
@@ -510,24 +572,23 @@ func writeTfplan(plan *plans.Plan, w io.Writer) error {
 		Version:          tfplanFormatVersion,
 		TerraformVersion: version.String(),
 
-		Variables:       map[string]*planproto.DynamicValue{},
-		OutputChanges:   []*planproto.OutputChange{},
-		CheckResults:    []*planproto.CheckResults{},
-		ResourceChanges: []*planproto.ResourceInstanceChange{},
-		ResourceDrift:   []*planproto.ResourceInstanceChange{},
+		Variables:         map[string]*planproto.DynamicValue{},
+		OutputChanges:     []*planproto.OutputChange{},
+		CheckResults:      []*planproto.CheckResults{},
+		ResourceChanges:   []*planproto.ResourceInstanceChange{},
+		ResourceDrift:     []*planproto.ResourceInstanceChange{},
+		DeferredChanges:   []*planproto.DeferredResourceInstanceChange{},
+		ActionInvocations: []*planproto.ActionInvocationInstance{},
 	}
 
+	rawPlan.Applyable = plan.Applyable
+	rawPlan.Complete = plan.Complete
 	rawPlan.Errored = plan.Errored
 
-	switch plan.UIMode {
-	case plans.NormalMode:
-		rawPlan.UiMode = planproto.Mode_NORMAL
-	case plans.DestroyMode:
-		rawPlan.UiMode = planproto.Mode_DESTROY
-	case plans.RefreshOnlyMode:
-		rawPlan.UiMode = planproto.Mode_REFRESH_ONLY
-	default:
-		return fmt.Errorf("plan has unsupported mode %s", plan.UIMode)
+	var err error
+	rawPlan.UiMode, err = planproto.NewMode(plan.UIMode)
+	if err != nil {
+		return err
 	}
 
 	for _, oc := range plan.Changes.Outputs {
@@ -555,61 +616,11 @@ func writeTfplan(plan *plans.Plan, w io.Writer) error {
 		})
 	}
 
-	if plan.Checks != nil {
-		for _, configElem := range plan.Checks.ConfigResults.Elems {
-			crs := configElem.Value
-			pcrs := &planproto.CheckResults{
-				ConfigAddr: configElem.Key.String(),
-			}
-			switch crs.Status {
-			case checks.StatusUnknown:
-				pcrs.Status = planproto.CheckResults_UNKNOWN
-			case checks.StatusPass:
-				pcrs.Status = planproto.CheckResults_PASS
-			case checks.StatusFail:
-				pcrs.Status = planproto.CheckResults_FAIL
-			case checks.StatusError:
-				pcrs.Status = planproto.CheckResults_ERROR
-			default:
-				return fmt.Errorf("checkable configuration %s has unsupported aggregate status %s", configElem.Key, crs.Status)
-			}
-			switch kind := configElem.Key.CheckableKind(); kind {
-			case addrs.CheckableResource:
-				pcrs.Kind = planproto.CheckResults_RESOURCE
-			case addrs.CheckableOutputValue:
-				pcrs.Kind = planproto.CheckResults_OUTPUT_VALUE
-			case addrs.CheckableCheck:
-				pcrs.Kind = planproto.CheckResults_CHECK
-			case addrs.CheckableInputVariable:
-				pcrs.Kind = planproto.CheckResults_INPUT_VARIABLE
-			default:
-				return fmt.Errorf("checkable configuration %s has unsupported object type kind %s", configElem.Key, kind)
-			}
-
-			for _, objectElem := range configElem.Value.ObjectResults.Elems {
-				cr := objectElem.Value
-				pcr := &planproto.CheckResults_ObjectResult{
-					ObjectAddr:      objectElem.Key.String(),
-					FailureMessages: objectElem.Value.FailureMessages,
-				}
-				switch cr.Status {
-				case checks.StatusUnknown:
-					pcr.Status = planproto.CheckResults_UNKNOWN
-				case checks.StatusPass:
-					pcr.Status = planproto.CheckResults_PASS
-				case checks.StatusFail:
-					pcr.Status = planproto.CheckResults_FAIL
-				case checks.StatusError:
-					pcr.Status = planproto.CheckResults_ERROR
-				default:
-					return fmt.Errorf("checkable object %s has unsupported status %s", objectElem.Key, crs.Status)
-				}
-				pcrs.Objects = append(pcrs.Objects, pcr)
-			}
-
-			rawPlan.CheckResults = append(rawPlan.CheckResults, pcrs)
-		}
+	checkResults, err := CheckResultsToPlanProto(plan.Checks)
+	if err != nil {
+		return fmt.Errorf("failed to encode check results: %s", err)
 	}
+	rawPlan.CheckResults = checkResults
 
 	for _, rc := range plan.Changes.Resources {
 		rawRC, err := resourceChangeToTfplan(rc)
@@ -625,6 +636,14 @@ func writeTfplan(plan *plans.Plan, w io.Writer) error {
 			return err
 		}
 		rawPlan.ResourceDrift = append(rawPlan.ResourceDrift, rawRC)
+	}
+
+	for _, dc := range plan.DeferredResources {
+		rawDC, err := deferredChangeToTfplan(dc)
+		if err != nil {
+			return err
+		}
+		rawPlan.DeferredChanges = append(rawPlan.DeferredChanges, rawDC)
 	}
 
 	for _, ra := range plan.RelevantAttributes {
@@ -646,18 +665,56 @@ func writeTfplan(plan *plans.Plan, w io.Writer) error {
 	for name, val := range plan.VariableValues {
 		rawPlan.Variables[name] = valueToTfplan(val)
 	}
-
-	if plan.Backend.Type == "" || plan.Backend.Config == nil {
-		// This suggests a bug in the code that created the plan, since it
-		// ought to always have a backend populated, even if it's the default
-		// "local" backend with a local state file.
-		return fmt.Errorf("plan does not have a backend configuration")
+	if plan.ApplyTimeVariables.Len() != 0 {
+		rawPlan.ApplyTimeVariables = slices.Collect(plan.ApplyTimeVariables.All())
 	}
 
-	rawPlan.Backend = &planproto.Backend{
-		Type:      plan.Backend.Type,
-		Config:    valueToTfplan(plan.Backend.Config),
-		Workspace: plan.Backend.Workspace,
+	for _, hash := range plan.FunctionResults {
+		rawPlan.FunctionResults = append(rawPlan.FunctionResults,
+			&planproto.FunctionCallHash{
+				Key:    hash.Key,
+				Result: hash.Result,
+			},
+		)
+	}
+
+	for _, action := range plan.ActionInvocations {
+		rawAction, err := actionInvocationToTfPlan(action)
+		if err != nil {
+			return err
+		}
+		rawPlan.ActionInvocations = append(rawPlan.ActionInvocations, rawAction)
+	}
+
+	// Store details about accessing state
+	backendInUse := plan.Backend.Type != "" && plan.Backend.Config != nil
+	stateStoreInUse := plan.StateStore.Type != "" && plan.StateStore.Config != nil
+	switch {
+	case !backendInUse && !stateStoreInUse:
+		// This suggests a bug in the code that created the plan, since it
+		// ought to always have either a backend or state_store populated, even if it's the default
+		// "local" backend with a local state file.
+		return fmt.Errorf("plan does not have a backend or state_store configuration")
+	case backendInUse && stateStoreInUse:
+		// This suggests a bug in the code that created the plan, since it
+		// should never have both a backend and state_store populated.
+		return fmt.Errorf("plan contains both backend and state_store configurations, only one is expected")
+	case backendInUse:
+		rawPlan.Backend = &planproto.Backend{
+			Type:      plan.Backend.Type,
+			Config:    valueToTfplan(plan.Backend.Config),
+			Workspace: plan.Backend.Workspace,
+		}
+	case stateStoreInUse:
+		rawPlan.StateStore = &planproto.StateStore{
+			Type: plan.StateStore.Type,
+			Provider: &planproto.Provider{
+				Version: plan.StateStore.Provider.Version.String(),
+				Source:  plan.StateStore.Provider.Source.String(),
+			},
+			Config:    valueToTfplan(plan.StateStore.Config),
+			Workspace: plan.StateStore.Workspace,
+		}
 	}
 
 	rawPlan.Timestamp = plan.Timestamp.Format(time.RFC3339)
@@ -715,7 +772,7 @@ func resourceAttrFromTfplan(ra *planproto.PlanResourceAttr) (globalref.ResourceA
 // in its own wire format while using a different overall container.
 func ResourceChangeToProto(change *plans.ResourceInstanceChangeSrc) (*planproto.ResourceInstanceChange, error) {
 	if change == nil {
-		// We assume this represents the absense of a change, then.
+		// We assume this represents the absence of a change, then.
 		return nil, nil
 	}
 	return resourceChangeToTfplan(change)
@@ -818,6 +875,10 @@ func ActionToProto(action plans.Action) (planproto.Action, error) {
 		return planproto.Action_DELETE_THEN_CREATE, nil
 	case plans.CreateThenDelete:
 		return planproto.Action_CREATE_THEN_DELETE, nil
+	case plans.Forget:
+		return planproto.Action_FORGET, nil
+	case plans.CreateThenForget:
+		return planproto.Action_CREATE_THEN_FORGET, nil
 	default:
 		return planproto.Action_NOOP, fmt.Errorf("invalid change action %s", action)
 	}
@@ -829,11 +890,11 @@ func changeToTfplan(change *plans.ChangeSrc) (*planproto.Change, error) {
 	before := valueToTfplan(change.Before)
 	after := valueToTfplan(change.After)
 
-	beforeSensitivePaths, err := pathValueMarksToTfplan(change.BeforeValMarks)
+	beforeSensitivePaths, err := pathsToTfplan(change.BeforeSensitivePaths)
 	if err != nil {
 		return nil, err
 	}
-	afterSensitivePaths, err := pathValueMarksToTfplan(change.AfterValMarks)
+	afterSensitivePaths, err := pathsToTfplan(change.AfterSensitivePaths)
 	if err != nil {
 		return nil, err
 	}
@@ -841,12 +902,25 @@ func changeToTfplan(change *plans.ChangeSrc) (*planproto.Change, error) {
 	ret.AfterSensitivePaths = afterSensitivePaths
 
 	if change.Importing != nil {
+		var identity *planproto.DynamicValue
+		if change.Importing.Identity != nil {
+			identity = planproto.NewPlanDynamicValue(change.Importing.Identity)
+		}
 		ret.Importing = &planproto.Importing{
-			Id: change.Importing.ID,
+			Id:       change.Importing.ID,
+			Unknown:  change.Importing.Unknown,
+			Identity: identity,
 		}
 
 	}
 	ret.GeneratedConfig = change.GeneratedConfig
+
+	if change.BeforeIdentity != nil {
+		ret.BeforeIdentity = planproto.NewPlanDynamicValue(change.BeforeIdentity)
+	}
+	if change.AfterIdentity != nil {
+		ret.AfterIdentity = planproto.NewPlanDynamicValue(change.AfterIdentity)
+	}
 
 	ret.Action, err = ActionToProto(change.Action)
 	if err != nil {
@@ -868,6 +942,10 @@ func changeToTfplan(change *plans.ChangeSrc) (*planproto.Change, error) {
 		ret.Values = []*planproto.DynamicValue{before, after}
 	case planproto.Action_CREATE_THEN_DELETE:
 		ret.Values = []*planproto.DynamicValue{before, after}
+	case planproto.Action_FORGET:
+		ret.Values = []*planproto.DynamicValue{before}
+	case planproto.Action_CREATE_THEN_FORGET:
+		ret.Values = []*planproto.DynamicValue{before, after}
 	default:
 		return nil, fmt.Errorf("invalid change action %s", change.Action)
 	}
@@ -879,25 +957,28 @@ func valueToTfplan(val plans.DynamicValue) *planproto.DynamicValue {
 	return planproto.NewPlanDynamicValue(val)
 }
 
-func pathValueMarksFromTfplan(paths []*planproto.Path, marks cty.ValueMarks) ([]cty.PathValueMarks, error) {
-	ret := make([]cty.PathValueMarks, 0, len(paths))
+func pathsFromTfplan(paths []*planproto.Path) ([]cty.Path, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	ret := make([]cty.Path, 0, len(paths))
 	for _, p := range paths {
 		path, err := pathFromTfplan(p)
 		if err != nil {
 			return nil, err
 		}
-		ret = append(ret, cty.PathValueMarks{
-			Path:  path,
-			Marks: marks,
-		})
+		ret = append(ret, path)
 	}
 	return ret, nil
 }
 
-func pathValueMarksToTfplan(pvm []cty.PathValueMarks) ([]*planproto.Path, error) {
-	ret := make([]*planproto.Path, 0, len(pvm))
-	for _, p := range pvm {
-		path, err := pathToTfplan(p.Path)
+func pathsToTfplan(paths []cty.Path) ([]*planproto.Path, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	ret := make([]*planproto.Path, 0, len(paths))
+	for _, p := range paths {
+		path, err := pathToTfplan(p)
 		if err != nil {
 			return nil, err
 		}
@@ -947,4 +1028,254 @@ func pathFromTfplan(path *planproto.Path) (cty.Path, error) {
 
 func pathToTfplan(path cty.Path) (*planproto.Path, error) {
 	return planproto.NewPath(path)
+}
+
+func deferredChangeToTfplan(dc *plans.DeferredResourceInstanceChangeSrc) (*planproto.DeferredResourceInstanceChange, error) {
+	change, err := resourceChangeToTfplan(dc.ChangeSrc)
+	if err != nil {
+		return nil, err
+	}
+
+	reason, err := DeferredReasonToProto(dc.DeferredReason)
+	if err != nil {
+		return nil, err
+	}
+
+	return &planproto.DeferredResourceInstanceChange{
+		Change: change,
+		Deferred: &planproto.Deferred{
+			Reason: reason,
+		},
+	}, nil
+}
+
+func DeferredReasonToProto(reason providers.DeferredReason) (planproto.DeferredReason, error) {
+	switch reason {
+	case providers.DeferredReasonInstanceCountUnknown:
+		return planproto.DeferredReason_INSTANCE_COUNT_UNKNOWN, nil
+	case providers.DeferredReasonResourceConfigUnknown:
+		return planproto.DeferredReason_RESOURCE_CONFIG_UNKNOWN, nil
+	case providers.DeferredReasonProviderConfigUnknown:
+		return planproto.DeferredReason_PROVIDER_CONFIG_UNKNOWN, nil
+	case providers.DeferredReasonAbsentPrereq:
+		return planproto.DeferredReason_ABSENT_PREREQ, nil
+	case providers.DeferredReasonDeferredPrereq:
+		return planproto.DeferredReason_DEFERRED_PREREQ, nil
+	default:
+		return planproto.DeferredReason_INVALID, fmt.Errorf("invalid deferred reason %s", reason)
+	}
+}
+
+// CheckResultsFromPlanProto decodes a slice of check results from their protobuf
+// representation into the "states" package's representation.
+//
+// It's used by the stackplan package, which includes an identical representation
+// of check results within a different overall container.
+func CheckResultsFromPlanProto(proto []*planproto.CheckResults) (*states.CheckResults, error) {
+	configResults := addrs.MakeMap[addrs.ConfigCheckable, *states.CheckResultAggregate]()
+
+	for _, rawCheckResults := range proto {
+		aggr := &states.CheckResultAggregate{}
+		switch rawCheckResults.Status {
+		case planproto.CheckResults_UNKNOWN:
+			aggr.Status = checks.StatusUnknown
+		case planproto.CheckResults_PASS:
+			aggr.Status = checks.StatusPass
+		case planproto.CheckResults_FAIL:
+			aggr.Status = checks.StatusFail
+		case planproto.CheckResults_ERROR:
+			aggr.Status = checks.StatusError
+		default:
+			return nil,
+				fmt.Errorf("aggregate check results for %s have unsupported status %#v",
+					rawCheckResults.ConfigAddr, rawCheckResults.Status)
+		}
+
+		var objKind addrs.CheckableKind
+		switch rawCheckResults.Kind {
+		case planproto.CheckResults_RESOURCE:
+			objKind = addrs.CheckableResource
+		case planproto.CheckResults_OUTPUT_VALUE:
+			objKind = addrs.CheckableOutputValue
+		case planproto.CheckResults_CHECK:
+			objKind = addrs.CheckableCheck
+		case planproto.CheckResults_INPUT_VARIABLE:
+			objKind = addrs.CheckableInputVariable
+		default:
+			return nil, fmt.Errorf("aggregate check results for %s have unsupported object kind %s",
+				rawCheckResults.ConfigAddr, objKind)
+		}
+
+		// Some trickiness here: we only have an address parser for
+		// addrs.Checkable and not for addrs.ConfigCheckable, but that's okay
+		// because once we have an addrs.Checkable we can always derive an
+		// addrs.ConfigCheckable from it, and a ConfigCheckable should always
+		// be the same syntax as a Checkable with no index information and
+		// thus we can reuse the same parser for both here.
+		configAddrProxy, diags := addrs.ParseCheckableStr(objKind, rawCheckResults.ConfigAddr)
+		if diags.HasErrors() {
+			return nil, diags.Err()
+		}
+		configAddr := configAddrProxy.ConfigCheckable()
+		if configAddr.String() != configAddrProxy.String() {
+			// This is how we catch if the config address included index
+			// information that would be allowed in a Checkable but not
+			// in a ConfigCheckable.
+			return nil, fmt.Errorf("invalid checkable config address %s", rawCheckResults.ConfigAddr)
+		}
+
+		aggr.ObjectResults = addrs.MakeMap[addrs.Checkable, *states.CheckResultObject]()
+		for _, rawCheckResult := range rawCheckResults.Objects {
+			objectAddr, diags := addrs.ParseCheckableStr(objKind, rawCheckResult.ObjectAddr)
+			if diags.HasErrors() {
+				return nil, diags.Err()
+			}
+			if !addrs.Equivalent(objectAddr.ConfigCheckable(), configAddr) {
+				return nil, fmt.Errorf("checkable object %s should not be grouped under %s", objectAddr, configAddr)
+			}
+
+			obj := &states.CheckResultObject{
+				FailureMessages: rawCheckResult.FailureMessages,
+			}
+			switch rawCheckResult.Status {
+			case planproto.CheckResults_UNKNOWN:
+				obj.Status = checks.StatusUnknown
+			case planproto.CheckResults_PASS:
+				obj.Status = checks.StatusPass
+			case planproto.CheckResults_FAIL:
+				obj.Status = checks.StatusFail
+			case planproto.CheckResults_ERROR:
+				obj.Status = checks.StatusError
+			default:
+				return nil, fmt.Errorf("object check results for %s has unsupported status %#v",
+					rawCheckResult.ObjectAddr, rawCheckResult.Status)
+			}
+
+			aggr.ObjectResults.Put(objectAddr, obj)
+		}
+
+		// If we ended up with no elements in the map then we'll just nil it,
+		// primarily just to make life easier for our round-trip tests.
+		if aggr.ObjectResults.Len() == 0 {
+			aggr.ObjectResults.Elems = nil
+		}
+
+		configResults.Put(configAddr, aggr)
+	}
+
+	// If we ended up with no elements in the map then we'll just nil it,
+	// primarily just to make life easier for our round-trip tests.
+	if configResults.Len() == 0 {
+		configResults.Elems = nil
+	}
+
+	return &states.CheckResults{
+		ConfigResults: configResults,
+	}, nil
+}
+
+// CheckResultsToPlanProto encodes a slice of check results from the "states"
+// package's representation into their protobuf representation.
+//
+// It's used by the stackplan package, which includes identical representation
+// of check results within a different overall container.
+func CheckResultsToPlanProto(checkResults *states.CheckResults) ([]*planproto.CheckResults, error) {
+	if checkResults != nil {
+		protoResults := make([]*planproto.CheckResults, 0)
+		for _, configElem := range checkResults.ConfigResults.Elems {
+			crs := configElem.Value
+			pcrs := &planproto.CheckResults{
+				ConfigAddr: configElem.Key.String(),
+			}
+			switch crs.Status {
+			case checks.StatusUnknown:
+				pcrs.Status = planproto.CheckResults_UNKNOWN
+			case checks.StatusPass:
+				pcrs.Status = planproto.CheckResults_PASS
+			case checks.StatusFail:
+				pcrs.Status = planproto.CheckResults_FAIL
+			case checks.StatusError:
+				pcrs.Status = planproto.CheckResults_ERROR
+			default:
+				return nil,
+					fmt.Errorf("checkable configuration %s has unsupported aggregate status %s", configElem.Key, crs.Status)
+			}
+			switch kind := configElem.Key.CheckableKind(); kind {
+			case addrs.CheckableResource:
+				pcrs.Kind = planproto.CheckResults_RESOURCE
+			case addrs.CheckableOutputValue:
+				pcrs.Kind = planproto.CheckResults_OUTPUT_VALUE
+			case addrs.CheckableCheck:
+				pcrs.Kind = planproto.CheckResults_CHECK
+			case addrs.CheckableInputVariable:
+				pcrs.Kind = planproto.CheckResults_INPUT_VARIABLE
+			default:
+				return nil,
+					fmt.Errorf("checkable configuration %s has unsupported object type kind %s", configElem.Key, kind)
+			}
+
+			for _, objectElem := range configElem.Value.ObjectResults.Elems {
+				cr := objectElem.Value
+				pcr := &planproto.CheckResults_ObjectResult{
+					ObjectAddr:      objectElem.Key.String(),
+					FailureMessages: objectElem.Value.FailureMessages,
+				}
+				switch cr.Status {
+				case checks.StatusUnknown:
+					pcr.Status = planproto.CheckResults_UNKNOWN
+				case checks.StatusPass:
+					pcr.Status = planproto.CheckResults_PASS
+				case checks.StatusFail:
+					pcr.Status = planproto.CheckResults_FAIL
+				case checks.StatusError:
+					pcr.Status = planproto.CheckResults_ERROR
+				default:
+					return nil,
+						fmt.Errorf("checkable object %s has unsupported status %s", objectElem.Key, crs.Status)
+				}
+				pcrs.Objects = append(pcrs.Objects, pcr)
+			}
+
+			protoResults = append(protoResults, pcrs)
+		}
+
+		return protoResults, nil
+	} else {
+		return nil, nil
+	}
+}
+
+func actionInvocationFromTfplan(rawAction *planproto.ActionInvocationInstance) (*plans.ActionInvocationInstanceSrc, error) {
+	if rawAction == nil {
+		// Should never happen in practice, since protobuf can't represent
+		// a nil value in a list.
+		return nil, fmt.Errorf("action invocation object is absent")
+	}
+
+	ret := &plans.ActionInvocationInstanceSrc{}
+	actionAddr, diags := addrs.ParseAbsActionInstanceStr(rawAction.Addr)
+	if diags.HasErrors() {
+		return nil, fmt.Errorf("invalid resource instance address %q: %w", rawAction.Addr, diags.Err())
+	}
+	ret.Addr = actionAddr
+
+	providerAddr, diags := addrs.ParseAbsProviderConfigStr(rawAction.Provider)
+	if diags.HasErrors() {
+		return nil, diags.Err()
+	}
+	ret.ProviderAddr = providerAddr
+
+	return ret, nil
+}
+
+func actionInvocationToTfPlan(action *plans.ActionInvocationInstanceSrc) (*planproto.ActionInvocationInstance, error) {
+	if action == nil {
+		return nil, nil
+	}
+
+	ret := &planproto.ActionInvocationInstance{
+		Addr:     action.Addr.String(),
+		Provider: action.ProviderAddr.String(),
+	}
+	return ret, nil
 }

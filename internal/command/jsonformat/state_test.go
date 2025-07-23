@@ -9,18 +9,17 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/mitchellh/colorstring"
-
-	"github.com/hashicorp/terraform/internal/command/jsonprovider"
-	"github.com/hashicorp/terraform/internal/command/jsonstate"
-	"github.com/hashicorp/terraform/internal/states/statefile"
-	"github.com/hashicorp/terraform/internal/terminal"
-
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/hashicorp/terraform/internal/addrs"
+	"github.com/hashicorp/terraform/internal/command/jsonprovider"
+	"github.com/hashicorp/terraform/internal/command/jsonstate"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
 	"github.com/hashicorp/terraform/internal/providers"
+	testing_provider "github.com/hashicorp/terraform/internal/providers/testing"
 	"github.com/hashicorp/terraform/internal/states"
+	"github.com/hashicorp/terraform/internal/states/statefile"
+	"github.com/hashicorp/terraform/internal/terminal"
 	"github.com/hashicorp/terraform/internal/terraform"
 )
 
@@ -87,7 +86,7 @@ func TestState(t *testing.T) {
 				RootModule:            root,
 				RootModuleOutputs:     outputs,
 				ProviderFormatVersion: jsonprovider.FormatVersion,
-				ProviderSchemas:       jsonprovider.MarshalForRenderer(tt.Schemas),
+				ProviderSchemas:       jsonprovider.MarshalForRenderer(tt.Schemas, false),
 			})
 
 			result := done(t).All()
@@ -98,8 +97,8 @@ func TestState(t *testing.T) {
 	}
 }
 
-func testProvider() *terraform.MockProvider {
-	p := new(terraform.MockProvider)
+func testProvider() *testing_provider.MockProvider {
+	p := new(testing_provider.MockProvider)
 	p.ReadResourceFn = func(req providers.ReadResourceRequest) providers.ReadResourceResponse {
 		return providers.ReadResourceResponse{NewState: req.PriorState}
 	}
@@ -112,7 +111,7 @@ func testProvider() *terraform.MockProvider {
 func testProviderSchema() *providers.GetProviderSchemaResponse {
 	return &providers.GetProviderSchemaResponse{
 		Provider: providers.Schema{
-			Block: &configschema.Block{
+			Body: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
 					"region": {Type: cty.String, Optional: true},
 				},
@@ -120,7 +119,7 @@ func testProviderSchema() *providers.GetProviderSchemaResponse {
 		},
 		ResourceTypes: map[string]providers.Schema{
 			"test_resource": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"id":      {Type: cty.String, Computed: true},
 						"foo":     {Type: cty.String, Optional: true},
@@ -142,7 +141,7 @@ func testProviderSchema() *providers.GetProviderSchemaResponse {
 		},
 		DataSources: map[string]providers.Schema{
 			"test_data_source": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"compute": {Type: cty.String, Optional: true},
 						"value":   {Type: cty.String, Computed: true},

@@ -1,38 +1,30 @@
 ---
-page_title: Resource Graph
+page_title: Dependency Graph
 description: >-
-  Terraform builds a dependency graph from the Terraform configurations, and
-  walks this graph to generate plans, refresh state, and more. This page
-  documents the details of what are contained in this graph, what types of nodes
-  there are, and how the edges of the graph are determined.
+  Learn how Terraform builds a dependency graph from the Terraform configurations and
+  uses the graph to generate plans, refresh state, perform other operations. 
 ---
 
-# Resource Graph
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+> [!IMPORTANT]  
+> **Documentation Update:** Product documentation previously located in `/website` has moved to the [`hashicorp/web-unified-docs`](https://github.com/hashicorp/web-unified-docs) repository, where all product documentation is now centralized. Please make contributions directly to `web-unified-docs`, since changes to `/website` in this repository will not appear on developer.hashicorp.com.
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
 
-Terraform builds a
-[dependency graph](https://en.wikipedia.org/wiki/Dependency_graph)
-from the Terraform configurations, and walks this graph to
-generate plans, refresh state, and more. This page documents
-the details of what are contained in this graph, what types
-of nodes there are, and how the edges of the graph are determined.
 
-~> **Advanced Topic!** This page covers technical details
-of Terraform. You don't need to understand these details to
-effectively use Terraform. The details are documented here for
-those who wish to learn about them without having to go
-spelunking through the source code.
+# Dependency Graph 
 
-For some background on graph theory, and a summary of how
-Terraform applies it, see the HashiCorp 2016 presentation
+This topic explains the dependency graph Terraform builds from Terraform configurations. This is an advanced topic and not required to understand how to use Terraform. 
+
+## Introduction 
+
+Terraform builds a dependency graph and uses it to perform operations, such as generate plans and refresh state. 
+For background on graph theory and a summary of how
+Terraform applies it, refer the HashiCorp 2016 presentation
 [_Applying Graph Theory to Infrastructure as Code_](https://www.youtube.com/watch?v=Ce3RNfRbdZ0).
-This presentation also covers some similar ideas to the following
-guide.
 
 ## Graph Nodes
 
-There are only a handful of node types that can exist within the
-graph. We'll cover these first before explaining how they're
-determined and built:
+The following node types can exist within the graph:
 
 - **Resource Node** - Represents a single resource. If you have
   the `count` metaparameter set, then there will be one resource

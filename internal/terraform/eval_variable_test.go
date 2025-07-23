@@ -9,10 +9,12 @@ import (
 	"testing"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hcltest"
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/checks"
+	"github.com/hashicorp/terraform/internal/configs"
 	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/lang/marks"
 	"github.com/hashicorp/terraform/internal/namedvals"
@@ -829,7 +831,7 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 				SourceType: ValueFromCaller,
 			}
 
-			got, diags := prepareFinalInputVariableValue(
+			got, diags := PrepareFinalInputVariableValue(
 				varAddr, rawVal, varCfg,
 			)
 
@@ -862,7 +864,7 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 			{
 				ValueFromUnknown,
 				tfdiags.SourceRange{},
-				`Invalid value for input variable: Unsuitable value for var.constrained_string_required set from outside of the configuration: string required.`,
+				`Invalid value for input variable: Unsuitable value for var.constrained_string_required set from outside of the configuration: string required, but have object.`,
 				`Required variable not set: Unsuitable value for var.constrained_string_required set from outside of the configuration: required variable may not be set to null.`,
 			},
 			{
@@ -872,7 +874,7 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 					Start:    tfdiags.SourcePos(hcl.InitialPos),
 					End:      tfdiags.SourcePos(hcl.InitialPos),
 				},
-				`Invalid value for input variable: The given value is not suitable for var.constrained_string_required declared at main.tf:32,3-41: string required.`,
+				`Invalid value for input variable: The given value is not suitable for var.constrained_string_required declared at main.tf:32,3-41: string required, but have object.`,
 				`Required variable not set: The given value is not suitable for var.constrained_string_required defined at main.tf:32,3-41: required variable may not be set to null.`,
 			},
 			{
@@ -882,7 +884,7 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 					Start:    tfdiags.SourcePos(hcl.InitialPos),
 					End:      tfdiags.SourcePos(hcl.InitialPos),
 				},
-				`Invalid value for input variable: The given value is not suitable for var.constrained_string_required declared at main.tf:32,3-41: string required.`,
+				`Invalid value for input variable: The given value is not suitable for var.constrained_string_required declared at main.tf:32,3-41: string required, but have object.`,
 				`Required variable not set: The given value is not suitable for var.constrained_string_required defined at main.tf:32,3-41: required variable may not be set to null.`,
 			},
 			{
@@ -892,25 +894,25 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 					Start:    tfdiags.SourcePos(hcl.InitialPos),
 					End:      tfdiags.SourcePos(hcl.InitialPos),
 				},
-				`Invalid value for input variable: The given value is not suitable for var.constrained_string_required declared at main.tf:32,3-41: string required.`,
+				`Invalid value for input variable: The given value is not suitable for var.constrained_string_required declared at main.tf:32,3-41: string required, but have object.`,
 				`Required variable not set: The given value is not suitable for var.constrained_string_required defined at main.tf:32,3-41: required variable may not be set to null.`,
 			},
 			{
 				ValueFromCLIArg,
 				tfdiags.SourceRange{},
-				`Invalid value for input variable: Unsuitable value for var.constrained_string_required set using -var="constrained_string_required=...": string required.`,
+				`Invalid value for input variable: Unsuitable value for var.constrained_string_required set using -var="constrained_string_required=...": string required, but have object.`,
 				`Required variable not set: Unsuitable value for var.constrained_string_required set using -var="constrained_string_required=...": required variable may not be set to null.`,
 			},
 			{
 				ValueFromEnvVar,
 				tfdiags.SourceRange{},
-				`Invalid value for input variable: Unsuitable value for var.constrained_string_required set using the TF_VAR_constrained_string_required environment variable: string required.`,
+				`Invalid value for input variable: Unsuitable value for var.constrained_string_required set using the TF_VAR_constrained_string_required environment variable: string required, but have object.`,
 				`Required variable not set: Unsuitable value for var.constrained_string_required set using the TF_VAR_constrained_string_required environment variable: required variable may not be set to null.`,
 			},
 			{
 				ValueFromInput,
 				tfdiags.SourceRange{},
-				`Invalid value for input variable: Unsuitable value for var.constrained_string_required set using an interactive prompt: string required.`,
+				`Invalid value for input variable: Unsuitable value for var.constrained_string_required set using an interactive prompt: string required, but have object.`,
 				`Required variable not set: Unsuitable value for var.constrained_string_required set using an interactive prompt: required variable may not be set to null.`,
 			},
 			{
@@ -921,13 +923,13 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 				// and during planning we'll always have other source types.
 				ValueFromPlan,
 				tfdiags.SourceRange{},
-				`Invalid value for input variable: Unsuitable value for var.constrained_string_required set from outside of the configuration: string required.`,
+				`Invalid value for input variable: Unsuitable value for var.constrained_string_required set from outside of the configuration: string required, but have object.`,
 				`Required variable not set: Unsuitable value for var.constrained_string_required set from outside of the configuration: required variable may not be set to null.`,
 			},
 			{
 				ValueFromCaller,
 				tfdiags.SourceRange{},
-				`Invalid value for input variable: Unsuitable value for var.constrained_string_required set from outside of the configuration: string required.`,
+				`Invalid value for input variable: Unsuitable value for var.constrained_string_required set from outside of the configuration: string required, but have object.`,
 				`Required variable not set: Unsuitable value for var.constrained_string_required set from outside of the configuration: required variable may not be set to null.`,
 			},
 		}
@@ -943,7 +945,7 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 						SourceRange: test.SourceRange,
 					}
 
-					_, diags := prepareFinalInputVariableValue(
+					_, diags := PrepareFinalInputVariableValue(
 						varAddr, rawVal, varCfg,
 					)
 					if !diags.HasErrors() {
@@ -961,7 +963,7 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 						SourceRange: test.SourceRange,
 					}
 
-					_, diags := prepareFinalInputVariableValue(
+					_, diags := PrepareFinalInputVariableValue(
 						varAddr, rawVal, varCfg,
 					)
 					if !diags.HasErrors() {
@@ -986,7 +988,7 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 			{
 				ValueFromUnknown,
 				tfdiags.SourceRange{},
-				"Invalid value for input variable: Unsuitable value for var.constrained_string_sensitive_required set from outside of the configuration: string required.",
+				"Invalid value for input variable: Unsuitable value for var.constrained_string_sensitive_required set from outside of the configuration: string required, but have object.",
 				false,
 			},
 			{
@@ -996,7 +998,7 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 					Start:    tfdiags.SourcePos(hcl.InitialPos),
 					End:      tfdiags.SourcePos(hcl.InitialPos),
 				},
-				`Invalid value for input variable: The given value is not suitable for var.constrained_string_sensitive_required, which is sensitive: string required. Invalid value defined at example.tfvars:1,1-1.`,
+				`Invalid value for input variable: The given value is not suitable for var.constrained_string_sensitive_required, which is sensitive: string required, but have object. Invalid value defined at example.tfvars:1,1-1.`,
 				true,
 			},
 		}
@@ -1012,7 +1014,7 @@ func TestPrepareFinalInputVariableValue(t *testing.T) {
 						SourceRange: test.SourceRange,
 					}
 
-					_, diags := prepareFinalInputVariableValue(
+					_, diags := PrepareFinalInputVariableValue(
 						varAddr, rawVal, varCfg,
 					)
 					if !diags.HasErrors() {
@@ -1142,14 +1144,20 @@ func TestEvalVariableValidations_jsonErrorMessageEdgeCase(t *testing.T) {
 
 			// We need a minimal scope to allow basic functions to be passed to
 			// the HCL scope
-			ctx.EvaluationScopeScope = &lang.Scope{}
+			ctx.EvaluationScopeScope = &lang.Scope{
+				Data: &fakeEvaluationData{
+					inputVariables: map[addrs.InputVariable]cty.Value{
+						varAddr.Variable: test.given,
+					},
+				},
+			}
 			ctx.NamedValuesState = namedvals.NewState()
 			ctx.NamedValuesState.SetInputVariableValue(varAddr, test.given)
 			ctx.ChecksState = checks.NewState(cfg)
 			ctx.ChecksState.ReportCheckableObjects(varAddr.ConfigCheckable(), addrs.MakeSet[addrs.Checkable](varAddr))
 
 			gotDiags := evalVariableValidations(
-				varAddr, varCfg, nil, ctx,
+				varAddr, ctx, varCfg.Validations, varCfg.DeclRange, false,
 			)
 
 			if ctx.ChecksState.ObjectCheckStatus(varAddr) != test.status {
@@ -1291,18 +1299,24 @@ variable "bar" {
 
 			// We need a minimal scope to allow basic functions to be passed to
 			// the HCL scope
-			ctx.EvaluationScopeScope = &lang.Scope{}
-			ctx.NamedValuesState = namedvals.NewState()
+			varVal := test.given
 			if varCfg.Sensitive {
-				ctx.NamedValuesState.SetInputVariableValue(varAddr, test.given.Mark(marks.Sensitive))
-			} else {
-				ctx.NamedValuesState.SetInputVariableValue(varAddr, test.given)
+				varVal = varVal.Mark(marks.Sensitive)
 			}
+			ctx.EvaluationScopeScope = &lang.Scope{
+				Data: &fakeEvaluationData{
+					inputVariables: map[addrs.InputVariable]cty.Value{
+						varAddr.Variable: varVal,
+					},
+				},
+			}
+			ctx.NamedValuesState = namedvals.NewState()
+			ctx.NamedValuesState.SetInputVariableValue(varAddr, varVal)
 			ctx.ChecksState = checks.NewState(cfg)
 			ctx.ChecksState.ReportCheckableObjects(varAddr.ConfigCheckable(), addrs.MakeSet[addrs.Checkable](varAddr))
 
 			gotDiags := evalVariableValidations(
-				varAddr, varCfg, nil, ctx,
+				varAddr, ctx, varCfg.Validations, varCfg.DeclRange, false,
 			)
 
 			if ctx.ChecksState.ObjectCheckStatus(varAddr) != test.status {
@@ -1330,4 +1344,58 @@ variable "bar" {
 			}
 		})
 	}
+}
+
+func TestEvalVariableValidation_unknownErrorMessage(t *testing.T) {
+	t.Run("known condition, unknown error_message", func(t *testing.T) {
+		rule := &configs.CheckRule{
+			Condition:    hcltest.MockExprLiteral(cty.False),
+			ErrorMessage: hcltest.MockExprLiteral(cty.UnknownVal(cty.String)),
+		}
+		hclCtx := &hcl.EvalContext{}
+		varAddr := addrs.AbsInputVariableInstance{
+			Module:   addrs.RootModuleInstance,
+			Variable: addrs.InputVariable{Name: "foo"},
+		}
+
+		// this should not produce any error when validationWalk is true
+		result, diags := evalVariableValidation(rule, hclCtx, hcl.Range{}, varAddr, 0, true)
+		if got, want := result.Status, checks.StatusUnknown; got != want {
+			t.Errorf("wrong result.Status\ngot:  %s\nwant: %s", got, want)
+		}
+		if diags.HasErrors() {
+			t.Fatal(diags.ErrWithWarnings())
+		}
+
+		// any other time this should result in an error
+		result, diags = evalVariableValidation(rule, hclCtx, hcl.Range{}, varAddr, 0, false)
+		if got, want := result.Status, checks.StatusError; got != want {
+			t.Errorf("wrong result.Status\ngot:  %s\nwant: %s", got, want)
+		}
+		if !diags.HasErrors() {
+			t.Fatalf("unexpected success; want error")
+		}
+		found := false
+		hasCorrectExtra := false
+		wantDesc := tfdiags.Description{
+			Summary: "Invalid error message",
+			Detail:  "Unsuitable value for error message: expression refers to values that won't be known until the apply phase.",
+		}
+		for _, diag := range diags {
+			gotDesc := diag.Description()
+			if diag.Severity() == tfdiags.Error && gotDesc.Summary == wantDesc.Summary && gotDesc.Detail == wantDesc.Detail {
+				found = true
+				hasCorrectExtra = tfdiags.DiagnosticCausedByUnknown(diag)
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing expected error diagnostic\nwant: %s: %s\ngot:  %s",
+				wantDesc.Summary, wantDesc.Detail,
+				diags.Err().Error(),
+			)
+		} else if !hasCorrectExtra {
+			t.Errorf("diagnostic is not marked as being 'caused by unknown'")
+		}
+	})
 }

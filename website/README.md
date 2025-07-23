@@ -1,5 +1,10 @@
 # Terraform Documentation
 
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+> [!IMPORTANT]  
+> **Documentation Update:** Product documentation previously located in `/website` has moved to the [`hashicorp/web-unified-docs`](https://github.com/hashicorp/web-unified-docs) repository, where all product documentation is now centralized. Please make contributions directly to `web-unified-docs`, since changes to `/website` in this repository will not appear on developer.hashicorp.com.
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+
 This directory contains the portions of [the Terraform website](https://www.terraform.io/) that pertain to the core functionality, excluding providers and the overall configuration.
 
 The website uses the files in this directory in conjunction with
@@ -23,7 +28,7 @@ If the validation fails, actionable error messages will be displayed to help you
 
 ## Modifying Sidebar Navigation
 
-You must update the the sidebar navigation when you add or delete documentation .mdx files. If you do not update the navigation, the website deploy preview fails.
+You must update the sidebar navigation when you add or delete documentation .mdx files. If you do not update the navigation, the website deploy preview fails.
 
 To update the sidebar navigation, you must edit the appropriate `nav-data.json` file. This repository contains the sidebar navigation files for the following documentation sets:
 
@@ -35,7 +40,7 @@ For more details about how to update the sidebar navigation, refer to [Editing N
 
 ## Adding Redirects
 
-You must add a redirect when you move, rename, or delete documentation pages. Refer to https://github.com/hashicorp/terraform-website#redirects for details.
+You must add a redirect when you move, rename, or delete documentation pages. Refer to https://github.com/hashicorp/terraform-docs-common#redirects for details.
 
 ## Previewing Changes
 

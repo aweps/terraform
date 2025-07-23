@@ -4,18 +4,67 @@
 package genconfig
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
+	ctyjson "github.com/zclconf/go-cty/cty/json"
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
 	"github.com/hashicorp/terraform/internal/tfdiags"
 )
+
+type Resource struct {
+	// HCL Body of the resource, which is the attributes and blocks
+	// that are part of the resource.
+	Body []byte
+
+	// Import is the HCL code for the import block. This is only
+	// generated for list resource results.
+	Import  []byte
+	Addr    addrs.AbsResourceInstance
+	Results []*Resource
+}
+
+func (r *Resource) String() string {
+	var buf strings.Builder
+	switch r.Addr.Resource.Resource.Mode {
+	case addrs.ListResourceMode:
+		last := len(r.Results) - 1
+		// sort the results by their keys so the output is consistent
+		for idx, managed := range r.Results {
+			if managed.Body != nil {
+				buf.WriteString(managed.String())
+				buf.WriteString("\n")
+			}
+			if managed.Import != nil {
+				buf.WriteString(string(managed.Import))
+				buf.WriteString("\n")
+			}
+			if idx != last {
+				buf.WriteString("\n")
+			}
+		}
+	case addrs.ManagedResourceMode:
+		buf.WriteString(fmt.Sprintf("resource %q %q {\n", r.Addr.Resource.Resource.Type, r.Addr.Resource.Resource.Name))
+		buf.Write(r.Body)
+		buf.WriteString("}")
+	default:
+		panic(fmt.Errorf("unsupported resource mode %s", r.Addr.Resource.Resource.Mode))
+	}
+
+	// The output better be valid HCL which can be parsed and formatted.
+	formatted := hclwrite.Format([]byte(buf.String()))
+	return string(formatted)
+}
 
 // GenerateResourceContents generates HCL configuration code for the provided
 // resource and state value.
@@ -26,40 +75,115 @@ import (
 func GenerateResourceContents(addr addrs.AbsResourceInstance,
 	schema *configschema.Block,
 	pc addrs.LocalProviderConfig,
-	stateVal cty.Value) (string, tfdiags.Diagnostics) {
+	stateVal cty.Value,
+	forceProviderAddr bool,
+) (*Resource, tfdiags.Diagnostics) {
 	var buf strings.Builder
 
 	var diags tfdiags.Diagnostics
 
-	if pc.LocalName != addr.Resource.Resource.ImpliedProvider() || pc.Alias != "" {
+	generateProviderAddr := pc.LocalName != addr.Resource.Resource.ImpliedProvider() || pc.Alias != ""
+
+	if generateProviderAddr || forceProviderAddr {
 		buf.WriteString(strings.Repeat(" ", 2))
 		buf.WriteString(fmt.Sprintf("provider = %s\n", pc.StringCompact()))
 	}
 
-	stateVal = omitUnknowns(stateVal)
 	if stateVal.RawEquals(cty.NilVal) {
 		diags = diags.Append(writeConfigAttributes(addr, &buf, schema.Attributes, 2))
 		diags = diags.Append(writeConfigBlocks(addr, &buf, schema.BlockTypes, 2))
 	} else {
-		diags = diags.Append(writeConfigAttributesFromExisting(addr, &buf, stateVal, schema.Attributes, 2))
+		diags = diags.Append(writeConfigAttributesFromExisting(addr, &buf, stateVal, schema.Attributes, 2, optionalOrRequiredProcessor))
 		diags = diags.Append(writeConfigBlocksFromExisting(addr, &buf, stateVal, schema.BlockTypes, 2))
 	}
 
 	// The output better be valid HCL which can be parsed and formatted.
 	formatted := hclwrite.Format([]byte(buf.String()))
-	return string(formatted), diags
+	return &Resource{
+		Body: formatted,
+		Addr: addr,
+	}, diags
 }
 
-func WrapResourceContents(addr addrs.AbsResourceInstance, config string) string {
+func GenerateListResourceContents(addr addrs.AbsResourceInstance,
+	schema *configschema.Block,
+	idSchema *configschema.Object,
+	pc addrs.LocalProviderConfig,
+	stateVal cty.Value,
+) (*Resource, tfdiags.Diagnostics) {
+	var diags tfdiags.Diagnostics
+	if !stateVal.CanIterateElements() {
+		diags = diags.Append(
+			hcl.Diagnostic{
+				Severity: hcl.DiagError,
+				Summary:  "Invalid resource instance value",
+				Detail:   fmt.Sprintf("Resource instance %s has nil or non-iterable value", addr),
+			})
+		return nil, diags
+	}
+
+	ret := make([]*Resource, stateVal.LengthInt())
+	iter := stateVal.ElementIterator()
+	for idx := 0; iter.Next(); idx++ {
+		// Generate a unique resource name for each instance in the list.
+		resAddr := addrs.AbsResourceInstance{
+			Module: addr.Module,
+			Resource: addrs.ResourceInstance{
+				Resource: addrs.Resource{
+					Mode: addrs.ManagedResourceMode,
+					Type: addr.Resource.Resource.Type,
+					Name: fmt.Sprintf("%s_%d", addr.Resource.Resource.Name, idx),
+				},
+				Key: addr.Resource.Key,
+			},
+		}
+		ls := &Resource{Addr: resAddr}
+		ret[idx] = ls
+
+		_, val := iter.Element()
+		// we still need to generate the resource block even if the state is not given,
+		// so that the import block can reference it.
+		stateVal := cty.NilVal
+		if val.Type().HasAttribute("state") {
+			stateVal = val.GetAttr("state")
+		}
+		content, gDiags := GenerateResourceContents(resAddr, schema, pc, stateVal, true)
+		if gDiags.HasErrors() {
+			diags = diags.Append(gDiags)
+			continue
+		}
+		ls.Body = content.Body
+
+		idVal := val.GetAttr("identity")
+		importContent, gDiags := generateImportBlock(resAddr, idSchema, pc, idVal)
+		if gDiags.HasErrors() {
+			diags = diags.Append(gDiags)
+			continue
+		}
+		ls.Import = bytes.TrimSpace(hclwrite.Format([]byte(importContent)))
+	}
+
+	return &Resource{
+		Results: ret,
+		Addr:    addr,
+	}, diags
+}
+
+func generateImportBlock(addr addrs.AbsResourceInstance, idSchema *configschema.Object, pc addrs.LocalProviderConfig, identity cty.Value) (string, tfdiags.Diagnostics) {
 	var buf strings.Builder
+	var diags tfdiags.Diagnostics
 
-	buf.WriteString(fmt.Sprintf("resource %q %q {\n", addr.Resource.Resource.Type, addr.Resource.Resource.Name))
-	buf.WriteString(config)
-	buf.WriteString("}")
+	buf.WriteString("\n")
+	buf.WriteString("import {\n")
+	buf.WriteString(fmt.Sprintf("  to = %s\n", addr.String()))
+	buf.WriteString(fmt.Sprintf("  provider = %s\n", pc.StringCompact()))
+	buf.WriteString("  identity = {\n")
+	diags = diags.Append(writeConfigAttributesFromExisting(addr, &buf, identity, idSchema.Attributes, 2, allowAllAttributesProcessor))
+	buf.WriteString(strings.Repeat(" ", 2))
+	buf.WriteString("}\n}\n")
 
-	// The output better be valid HCL which can be parsed and formatted.
 	formatted := hclwrite.Format([]byte(buf.String()))
-	return string(formatted)
+	return string(formatted), diags
 }
 
 func writeConfigAttributes(addr addrs.AbsResourceInstance, buf *strings.Builder, attrs map[string]*configschema.Attribute, indent int) tfdiags.Diagnostics {
@@ -70,14 +194,7 @@ func writeConfigAttributes(addr addrs.AbsResourceInstance, buf *strings.Builder,
 	}
 
 	// Get a list of sorted attribute names so the output will be consistent between runs.
-	keys := make([]string, 0, len(attrs))
-	for k := range attrs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	for i := range keys {
-		name := keys[i]
+	for _, name := range slices.Sorted(maps.Keys(attrs)) {
 		attrS := attrs[name]
 		if attrS.NestedType != nil {
 			diags = diags.Append(writeConfigNestedTypeAttribute(addr, buf, name, attrS, indent))
@@ -116,29 +233,30 @@ func writeConfigAttributes(addr addrs.AbsResourceInstance, buf *strings.Builder,
 	return diags
 }
 
-func writeConfigAttributesFromExisting(addr addrs.AbsResourceInstance, buf *strings.Builder, stateVal cty.Value, attrs map[string]*configschema.Attribute, indent int) tfdiags.Diagnostics {
+func optionalOrRequiredProcessor(attr *configschema.Attribute) bool {
+	// Exclude computed-only attributes
+	return attr.Optional || attr.Required
+}
+
+func allowAllAttributesProcessor(attr *configschema.Attribute) bool {
+	return true
+}
+
+func writeConfigAttributesFromExisting(addr addrs.AbsResourceInstance, buf *strings.Builder, stateVal cty.Value, attrs map[string]*configschema.Attribute, indent int, processAttr func(*configschema.Attribute) bool) tfdiags.Diagnostics {
 	var diags tfdiags.Diagnostics
 	if len(attrs) == 0 {
 		return diags
 	}
 
-	// Get a list of sorted attribute names so the output will be consistent between runs.
-	keys := make([]string, 0, len(attrs))
-	for k := range attrs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	for i := range keys {
-		name := keys[i]
+	// Sort attribute names so the output will be consistent between runs.
+	for _, name := range slices.Sorted(maps.Keys(attrs)) {
 		attrS := attrs[name]
 		if attrS.NestedType != nil {
 			writeConfigNestedTypeAttributeFromExisting(addr, buf, name, attrS, stateVal, indent)
 			continue
 		}
 
-		// Exclude computed-only attributes
-		if attrS.Required || attrS.Optional {
+		if processAttr != nil && processAttr(attrS) {
 			buf.WriteString(strings.Repeat(" ", indent))
 			buf.WriteString(fmt.Sprintf("%s = ", name))
 
@@ -149,29 +267,76 @@ func writeConfigAttributesFromExisting(addr addrs.AbsResourceInstance, buf *stri
 				val = attrS.EmptyValue()
 			}
 			if val.Type() == cty.String {
+				// Before we inspect the string, take off any marks.
+				unmarked, marks := val.Unmark()
+
 				// SHAMELESS HACK: If we have "" for an optional value, assume
 				// it is actually null, due to the legacy SDK.
-				if !val.IsNull() && attrS.Optional && len(val.AsString()) == 0 {
-					val = attrS.EmptyValue()
+				if !unmarked.IsNull() && attrS.Optional && len(unmarked.AsString()) == 0 {
+					unmarked = attrS.EmptyValue()
 				}
+
+				// Before we carry on, add the marks back.
+				val = unmarked.WithMarks(marks)
 			}
 			if attrS.Sensitive || val.IsMarked() {
 				buf.WriteString("null # sensitive")
 			} else {
-				tok := hclwrite.TokensForValue(val)
-				if _, err := tok.WriteTo(buf); err != nil {
-					diags = diags.Append(&hcl.Diagnostic{
-						Severity: hcl.DiagWarning,
-						Summary:  "Skipped part of config generation",
-						Detail:   fmt.Sprintf("Could not create attribute %s in %s when generating import configuration. The plan will likely report the missing attribute as being deleted.", name, addr),
-						Extra:    err,
-					})
-					continue
+				// If the value is a string storing a JSON value we want to represent it in a terraform native way
+				// and encapsulate it in `jsonencode` as it is the idiomatic representation
+				if val.IsKnown() && !val.IsNull() && val.Type() == cty.String && json.Valid([]byte(val.AsString())) {
+					var ctyValue ctyjson.SimpleJSONValue
+					err := ctyValue.UnmarshalJSON([]byte(val.AsString()))
+					if err != nil {
+						diags = diags.Append(&hcl.Diagnostic{
+							Severity: hcl.DiagWarning,
+							Summary:  "Failed to parse JSON",
+							Detail:   fmt.Sprintf("Could not parse JSON value of attribute %s in %s when generating import configuration. The plan will likely report the missing attribute as being deleted. This is most likely a bug in Terraform, please report it.", name, addr),
+							Extra:    err,
+						})
+						continue
+					}
+
+					// Lone deserializable primitive types are valid json, but should be treated as strings
+					if ctyValue.Type().IsPrimitiveType() {
+						if d := writeTokens(val, buf); d != nil {
+							diags = diags.Append(d)
+							continue
+						}
+					} else {
+						buf.WriteString("jsonencode(")
+
+						if d := writeTokens(ctyValue.Value, buf); d != nil {
+							diags = diags.Append(d)
+							continue
+						}
+
+						buf.WriteString(")")
+					}
+				} else {
+					if d := writeTokens(val, buf); d != nil {
+						diags = diags.Append(d)
+						continue
+					}
 				}
 			}
 
 			buf.WriteString("\n")
 		}
+	}
+	return diags
+}
+
+func writeTokens(val cty.Value, buf *strings.Builder) tfdiags.Diagnostics {
+	var diags tfdiags.Diagnostics
+	tok := hclwrite.TokensForValue(val)
+	if _, err := tok.WriteTo(buf); err != nil {
+		return diags.Append(&hcl.Diagnostic{
+			Severity: hcl.DiagWarning,
+			Summary:  "Skipped part of config generation",
+			Detail:   "Could not create attribute in import configuration. The plan will likely report the missing attribute as being deleted.",
+			Extra:    err,
+		})
 	}
 	return diags
 }
@@ -184,14 +349,7 @@ func writeConfigBlocks(addr addrs.AbsResourceInstance, buf *strings.Builder, blo
 	}
 
 	// Get a list of sorted block names so the output will be consistent between runs.
-	names := make([]string, 0, len(blocks))
-	for k := range blocks {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-
-	for i := range names {
-		name := names[i]
+	for _, name := range slices.Sorted(maps.Keys(blocks)) {
 		blockS := blocks[name]
 		diags = diags.Append(writeConfigNestedBlock(addr, buf, name, blockS, indent))
 	}
@@ -280,14 +438,8 @@ func writeConfigBlocksFromExisting(addr addrs.AbsResourceInstance, buf *strings.
 		return diags
 	}
 
-	// Get a list of sorted block names so the output will be consistent between runs.
-	names := make([]string, 0, len(blocks))
-	for k := range blocks {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-
-	for _, name := range names {
+	// Sort block names so the output will be consistent between runs.
+	for _, name := range slices.Sorted(maps.Keys(blocks)) {
 		blockS := blocks[name]
 		// This shouldn't happen in real usage; state always has all values (set
 		// to null as needed), but it protects against panics in tests (and any
@@ -304,6 +456,7 @@ func writeConfigBlocksFromExisting(addr addrs.AbsResourceInstance, buf *strings.
 
 func writeConfigNestedTypeAttributeFromExisting(addr addrs.AbsResourceInstance, buf *strings.Builder, name string, schema *configschema.Attribute, stateVal cty.Value, indent int) tfdiags.Diagnostics {
 	var diags tfdiags.Diagnostics
+	processor := optionalOrRequiredProcessor
 
 	switch schema.NestedType.Nesting {
 	case configschema.NestingSingle:
@@ -331,7 +484,7 @@ func writeConfigNestedTypeAttributeFromExisting(addr addrs.AbsResourceInstance, 
 
 		buf.WriteString(strings.Repeat(" ", indent))
 		buf.WriteString(fmt.Sprintf("%s = {\n", name))
-		diags = diags.Append(writeConfigAttributesFromExisting(addr, buf, nestedVal, schema.NestedType.Attributes, indent+2))
+		diags = diags.Append(writeConfigAttributesFromExisting(addr, buf, nestedVal, schema.NestedType.Attributes, indent+2, processor))
 		buf.WriteString("}\n")
 		return diags
 
@@ -363,7 +516,7 @@ func writeConfigNestedTypeAttributeFromExisting(addr addrs.AbsResourceInstance, 
 			}
 
 			buf.WriteString("{\n")
-			diags = diags.Append(writeConfigAttributesFromExisting(addr, buf, listVals[i], schema.NestedType.Attributes, indent+4))
+			diags = diags.Append(writeConfigAttributesFromExisting(addr, buf, listVals[i], schema.NestedType.Attributes, indent+4, processor))
 			buf.WriteString(strings.Repeat(" ", indent+2))
 			buf.WriteString("},\n")
 		}
@@ -387,17 +540,12 @@ func writeConfigNestedTypeAttributeFromExisting(addr addrs.AbsResourceInstance, 
 		}
 
 		vals := attr.AsValueMap()
-		keys := make([]string, 0, len(vals))
-		for key := range vals {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
 
 		buf.WriteString(strings.Repeat(" ", indent))
 		buf.WriteString(fmt.Sprintf("%s = {\n", name))
-		for _, key := range keys {
+		for _, key := range slices.Sorted(maps.Keys(vals)) {
 			buf.WriteString(strings.Repeat(" ", indent+2))
-			buf.WriteString(fmt.Sprintf("%s = {", key))
+			buf.WriteString(fmt.Sprintf("%s = {", hclEscapeString(key)))
 
 			// This entire value is marked
 			if vals[key].IsMarked() {
@@ -406,7 +554,7 @@ func writeConfigNestedTypeAttributeFromExisting(addr addrs.AbsResourceInstance, 
 			}
 
 			buf.WriteString("\n")
-			diags = diags.Append(writeConfigAttributesFromExisting(addr, buf, vals[key], schema.NestedType.Attributes, indent+4))
+			diags = diags.Append(writeConfigAttributesFromExisting(addr, buf, vals[key], schema.NestedType.Attributes, indent+4, processor))
 			buf.WriteString(strings.Repeat(" ", indent+2))
 			buf.WriteString("}\n")
 		}
@@ -422,6 +570,7 @@ func writeConfigNestedTypeAttributeFromExisting(addr addrs.AbsResourceInstance, 
 
 func writeConfigNestedBlockFromExisting(addr addrs.AbsResourceInstance, buf *strings.Builder, name string, schema *configschema.NestedBlock, stateVal cty.Value, indent int) tfdiags.Diagnostics {
 	var diags tfdiags.Diagnostics
+	processAttr := optionalOrRequiredProcessor
 
 	switch schema.Nesting {
 	case configschema.NestingSingle, configschema.NestingGroup:
@@ -437,7 +586,7 @@ func writeConfigNestedBlockFromExisting(addr addrs.AbsResourceInstance, buf *str
 			return diags
 		}
 		buf.WriteString("\n")
-		diags = diags.Append(writeConfigAttributesFromExisting(addr, buf, stateVal, schema.Attributes, indent+2))
+		diags = diags.Append(writeConfigAttributesFromExisting(addr, buf, stateVal, schema.Attributes, indent+2, processAttr))
 		diags = diags.Append(writeConfigBlocksFromExisting(addr, buf, stateVal, schema.BlockTypes, indent+2))
 		buf.WriteString("}\n")
 		return diags
@@ -451,7 +600,7 @@ func writeConfigNestedBlockFromExisting(addr addrs.AbsResourceInstance, buf *str
 		for i := range listVals {
 			buf.WriteString(strings.Repeat(" ", indent))
 			buf.WriteString(fmt.Sprintf("%s {\n", name))
-			diags = diags.Append(writeConfigAttributesFromExisting(addr, buf, listVals[i], schema.Attributes, indent+2))
+			diags = diags.Append(writeConfigAttributesFromExisting(addr, buf, listVals[i], schema.Attributes, indent+2, processAttr))
 			diags = diags.Append(writeConfigBlocksFromExisting(addr, buf, listVals[i], schema.BlockTypes, indent+2))
 			buf.WriteString("}\n")
 		}
@@ -464,12 +613,7 @@ func writeConfigNestedBlockFromExisting(addr addrs.AbsResourceInstance, buf *str
 		}
 
 		vals := stateVal.AsValueMap()
-		keys := make([]string, 0, len(vals))
-		for key := range vals {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
+		for _, key := range slices.Sorted(maps.Keys(vals)) {
 			buf.WriteString(strings.Repeat(" ", indent))
 			buf.WriteString(fmt.Sprintf("%s %q {", name, key))
 			// This entire map element is marked
@@ -478,7 +622,7 @@ func writeConfigNestedBlockFromExisting(addr addrs.AbsResourceInstance, buf *str
 				return diags
 			}
 			buf.WriteString("\n")
-			diags = diags.Append(writeConfigAttributesFromExisting(addr, buf, vals[key], schema.Attributes, indent+2))
+			diags = diags.Append(writeConfigAttributesFromExisting(addr, buf, vals[key], schema.Attributes, indent+2, processAttr))
 			diags = diags.Append(writeConfigBlocksFromExisting(addr, buf, vals[key], schema.BlockTypes, indent+2))
 			buf.WriteString(strings.Repeat(" ", indent))
 			buf.WriteString("}\n")
@@ -535,58 +679,20 @@ func ctyCollectionValues(val cty.Value) []cty.Value {
 	return ret
 }
 
-// omitUnknowns recursively walks the src cty.Value and returns a new cty.Value,
-// omitting any unknowns.
+// hclEscapeString formats the input string into a format that is safe for
+// rendering within HCL.
 //
-// The result also normalizes some types: all sequence types are turned into
-// tuple types and all mapping types are converted to object types, since we
-// assume the result of this is just going to be serialized as JSON (and thus
-// lose those distinctions) anyway.
-func omitUnknowns(val cty.Value) cty.Value {
-	ty := val.Type()
-	switch {
-	case val.IsNull():
-		return val
-	case !val.IsKnown():
-		return cty.NilVal
-	case ty.IsPrimitiveType():
-		return val
-	case ty.IsListType() || ty.IsTupleType() || ty.IsSetType():
-		var vals []cty.Value
-		it := val.ElementIterator()
-		for it.Next() {
-			_, v := it.Element()
-			newVal := omitUnknowns(v)
-			if newVal != cty.NilVal {
-				vals = append(vals, newVal)
-			} else if newVal == cty.NilVal {
-				// element order is how we correlate unknownness, so we must
-				// replace unknowns with nulls
-				vals = append(vals, cty.NullVal(v.Type()))
-			}
-		}
-		// We use tuple types always here, because the work we did above
-		// may have caused the individual elements to have different types,
-		// and we're doing this work to produce JSON anyway and JSON marshalling
-		// represents all of these sequence types as an array.
-		return cty.TupleVal(vals)
-	case ty.IsMapType() || ty.IsObjectType():
-		vals := make(map[string]cty.Value)
-		it := val.ElementIterator()
-		for it.Next() {
-			k, v := it.Element()
-			newVal := omitUnknowns(v)
-			if newVal != cty.NilVal {
-				vals[k.AsString()] = newVal
-			}
-		}
-		// We use object types always here, because the work we did above
-		// may have caused the individual elements to have different types,
-		// and we're doing this work to produce JSON anyway and JSON marshalling
-		// represents both of these mapping types as an object.
-		return cty.ObjectVal(vals)
-	default:
-		// Should never happen, since the above should cover all types
-		panic(fmt.Sprintf("omitUnknowns cannot handle %#v", val))
+// Note, this function doesn't actually do a very good job of this currently. We
+// need to expose some internal functions from HCL in a future version and call
+// them from here. For now, just use "%q" formatting.
+//
+// Note, the similar function in jsonformat/computed/renderers/map.go is doing
+// something similar.
+func hclEscapeString(str string) string {
+	// TODO: Replace this with more complete HCL logic instead of the simple
+	// go workaround.
+	if !hclsyntax.ValidIdentifier(str) {
+		return fmt.Sprintf("%q", str)
 	}
+	return str
 }

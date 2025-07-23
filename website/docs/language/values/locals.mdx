@@ -5,6 +5,12 @@ description: >-
   within a Terraform module.
 ---
 
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+> [!IMPORTANT]  
+> **Documentation Update:** Product documentation previously located in `/website` has moved to the [`hashicorp/web-unified-docs`](https://github.com/hashicorp/web-unified-docs) repository, where all product documentation is now centralized. Please make contributions directly to `web-unified-docs`, since changes to `/website` in this repository will not appear on developer.hashicorp.com.
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+
+
 # Local Values
 
 > **Hands-on:** Try the [Simplify Terraform Configuration with Locals](/terraform/tutorials/configuration-language/locals?utm_source=WEBSITE&utm_medium=WEB_IO&utm_offer=ARTICLE_PAGE&utm_content=DOCS) tutorial.
@@ -54,6 +60,36 @@ locals {
 }
 ```
 
+## Ephemeral values
+
+-> **Note**: Ephemeral local values are available in Terraform v1.10 and later.
+
+Local values implicitly become ephemeral if you reference an ephemeral value when you assign that local a value. For example, you can create a local that references an ephemeral `service_token`.
+
+```hcl
+variable "service_name" {
+  type    = string
+  default = "forum"
+}
+
+variable "environment" {
+  type    = string
+  default = "dev"
+}
+
+variable "service_token" {
+  type      = string
+  ephemeral = true
+}
+
+locals {
+  service_tag   = "${var.service_name}-${var.environment}"
+  session_token = "${var.service_name}:${var.service_token}"
+}
+```
+
+The `local.session_token` value is implicitly ephemeral because it relies on an ephemeral variable.
+
 ## Using Local Values
 
 Once a local value is declared, you can reference it in
@@ -63,7 +99,7 @@ Once a local value is declared, you can reference it in
 _reference_ them as attributes on an object named `local` (singular). Make sure
 to leave off the "s" when referencing a local value!
 
-```
+```hcl
 resource "aws_instance" "example" {
   # ...
 

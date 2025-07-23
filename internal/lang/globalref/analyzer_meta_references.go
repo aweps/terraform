@@ -11,7 +11,7 @@ import (
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
-	"github.com/hashicorp/terraform/internal/lang"
+	"github.com/hashicorp/terraform/internal/lang/langrefs"
 )
 
 // MetaReferences inspects the configuration to find the references contained
@@ -118,7 +118,7 @@ func (a *Analyzer) metaReferencesInputVariable(calleeAddr addrs.ModuleInstance, 
 	if attr == nil {
 		return nil
 	}
-	refs, _ := lang.ReferencesInExpr(addrs.ParseRef, attr.Expr)
+	refs, _ := langrefs.ReferencesInExpr(addrs.ParseRef, attr.Expr)
 	return absoluteRefs(callerAddr, refs)
 }
 
@@ -138,7 +138,7 @@ func (a *Analyzer) metaReferencesOutputValue(callerAddr addrs.ModuleInstance, ad
 
 	// We don't check for errors here because we'll make a best effort to
 	// analyze whatever partial result HCL is able to extract.
-	refs, _ := lang.ReferencesInExpr(addrs.ParseRef, oc.Expr)
+	refs, _ := langrefs.ReferencesInExpr(addrs.ParseRef, oc.Expr)
 	return absoluteRefs(calleeAddr, refs)
 }
 
@@ -155,7 +155,7 @@ func (a *Analyzer) metaReferencesLocalValue(moduleAddr addrs.ModuleInstance, add
 
 	// We don't check for errors here because we'll make a best effort to
 	// analyze whatever partial result HCL is able to extract.
-	refs, _ := lang.ReferencesInExpr(addrs.ParseRef, local.Expr)
+	refs, _ := langrefs.ReferencesInExpr(addrs.ParseRef, local.Expr)
 	return absoluteRefs(moduleAddr, refs)
 }
 
@@ -205,8 +205,8 @@ func (a *Analyzer) metaReferencesResourceInstance(moduleAddr addrs.ModuleInstanc
 		return nil
 	}
 
-	resourceTypeSchema, _ := providerSchema.SchemaForResourceAddr(addr.Resource)
-	if resourceTypeSchema == nil {
+	resourceTypeSchema := providerSchema.SchemaForResourceAddr(addr.Resource)
+	if resourceTypeSchema.Body == nil {
 		return nil
 	}
 
@@ -234,11 +234,11 @@ func (a *Analyzer) metaReferencesResourceInstance(moduleAddr addrs.ModuleInstanc
 		// Caller must also update "schema" if necessary.
 	}
 	traverseInBlock := func(name string) ([]hcl.Body, []hcl.Expression) {
-		if attr := schema.Attributes[name]; attr != nil {
+		if attr := schema.Body.Attributes[name]; attr != nil {
 			// When we reach a specific attribute we can't traverse any deeper, because attributes are the leaves of the schema.
-			schema = nil
+			schema.Body = nil
 			return traverseAttr(bodies, name)
-		} else if blockType := schema.BlockTypes[name]; blockType != nil {
+		} else if blockType := schema.Body.BlockTypes[name]; blockType != nil {
 			// We need to take a different action here depending on
 			// the nesting mode of the block type. Some require us
 			// to traverse in two steps in order to select a specific
@@ -248,7 +248,7 @@ func (a *Analyzer) metaReferencesResourceInstance(moduleAddr addrs.ModuleInstanc
 			case configschema.NestingSingle, configschema.NestingGroup:
 				// There should be only zero or one blocks of this
 				// type, so we can traverse in only one step.
-				schema = &blockType.Block
+				schema.Body = &blockType.Block
 				return traverseNestedBlockSingle(bodies, name)
 			case configschema.NestingMap, configschema.NestingList, configschema.NestingSet:
 				steppingThrough = blockType
@@ -258,14 +258,14 @@ func (a *Analyzer) metaReferencesResourceInstance(moduleAddr addrs.ModuleInstanc
 				// we add something new in future we'll bail out
 				// here and conservatively return everything under
 				// the current traversal point.
-				schema = nil
+				schema.Body = nil
 				return nil, nil
 			}
 		}
 
 		// We'll get here if the given name isn't in the schema at all. If so,
 		// there's nothing else to be done here.
-		schema = nil
+		schema.Body = nil
 		return nil, nil
 	}
 Steps:
@@ -281,7 +281,7 @@ Steps:
 		// a specific attribute) and so we'll stop early, assuming that
 		// any remaining steps are traversals into an attribute expression
 		// result.
-		if schema == nil {
+		if schema.Body == nil {
 			break
 		}
 
@@ -299,10 +299,10 @@ Steps:
 					continue
 				}
 				nextStep(traverseNestedBlockMap(bodies, steppingThroughType, step.Name))
-				schema = &steppingThrough.Block
+				schema.Body = &steppingThrough.Block
 			default:
 				nextStep(traverseInBlock(step.Name))
-				if schema == nil {
+				if schema.Body == nil {
 					// traverseInBlock determined that we've traversed as
 					// deep as we can with reference to schema, so we'll
 					// stop here and just process whatever's selected.
@@ -320,7 +320,7 @@ Steps:
 						continue
 					}
 					nextStep(traverseNestedBlockMap(bodies, steppingThroughType, keyVal.AsString()))
-					schema = &steppingThrough.Block
+					schema.Body = &steppingThrough.Block
 				case configschema.NestingList:
 					idxVal, err := convert.Convert(step.Key, cty.Number)
 					if err != nil { // Invalid traversal, so can't have any refs
@@ -334,7 +334,7 @@ Steps:
 						continue
 					}
 					nextStep(traverseNestedBlockList(bodies, steppingThroughType, idx))
-					schema = &steppingThrough.Block
+					schema.Body = &steppingThrough.Block
 				default:
 					// Note that NestingSet ends up in here because we don't
 					// actually allow traversing into set-backed block types,
@@ -352,7 +352,7 @@ Steps:
 					continue
 				}
 				nextStep(traverseInBlock(nameVal.AsString()))
-				if schema == nil {
+				if schema.Body == nil {
 					// traverseInBlock determined that we've traversed as
 					// deep as we can with reference to schema, so we'll
 					// stop here and just process whatever's selected.
@@ -389,12 +389,12 @@ Steps:
 
 	var refs []*addrs.Reference
 	for _, expr := range exprs {
-		moreRefs, _ := lang.ReferencesInExpr(addrs.ParseRef, expr)
+		moreRefs, _ := langrefs.ReferencesInExpr(addrs.ParseRef, expr)
 		refs = append(refs, moreRefs...)
 	}
-	if schema != nil {
+	if schema.Body != nil {
 		for _, body := range bodies {
-			moreRefs, _ := lang.ReferencesInBlock(addrs.ParseRef, body, schema)
+			moreRefs, _ := langrefs.ReferencesInBlock(addrs.ParseRef, body, schema.Body)
 			refs = append(refs, moreRefs...)
 		}
 	}

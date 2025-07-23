@@ -5,6 +5,12 @@ description: >-
   resources without writing a separate block for each one.
 ---
 
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+> [!IMPORTANT]  
+> **Documentation Update:** Product documentation previously located in `/website` has moved to the [`hashicorp/web-unified-docs`](https://github.com/hashicorp/web-unified-docs) repository, where all product documentation is now centralized. Please make contributions directly to `web-unified-docs`, since changes to `/website` in this repository will not appear on developer.hashicorp.com.
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+
+
 # The `for_each` Meta-Argument
 
 By default, a [resource block](/terraform/language/resources/syntax) configures one real
@@ -42,10 +48,10 @@ Map:
 
 ```hcl
 resource "azurerm_resource_group" "rg" {
-  for_each = {
-    a_group = "eastus"
+  for_each = tomap({
+    a_group       = "eastus"
     another_group = "westus2"
-  }
+  })
   name     = each.key
   location = each.value
 }
@@ -55,7 +61,7 @@ Set of strings:
 
 ```hcl
 resource "aws_iam_user" "the-accounts" {
-  for_each = toset( ["Todd", "James", "Alice", "Dottie"] )
+  for_each = toset(["Todd", "James", "Alice", "Dottie"])
   name     = each.key
 }
 ```

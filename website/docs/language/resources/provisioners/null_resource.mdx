@@ -5,6 +5,12 @@ description: >-
   are not directly associated with a single existing resource.
 ---
 
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+> [!IMPORTANT]  
+> **Documentation Update:** Product documentation previously located in `/website` has moved to the [`hashicorp/web-unified-docs`](https://github.com/hashicorp/web-unified-docs) repository, where all product documentation is now centralized. Please make contributions directly to `web-unified-docs`, since changes to `/website` in this repository will not appear on developer.hashicorp.com.
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+
+
 # Provisioners Without a Resource
 
 If you need to run provisioners that aren't directly associated with a specific
@@ -32,18 +38,18 @@ resource "aws_instance" "cluster" {
 
 resource "terraform_data" "cluster" {
   # Replacement of any instance of the cluster requires re-provisioning
-  triggers_replace = aws_instance.cluster.[*].id
+  triggers_replace = aws_instance.cluster[*].id
 
   # Bootstrap script can run on any instance of the cluster
   # So we just choose the first in this case
   connection {
-    host = aws_instance.cluster.[0].public_ip
+    host = aws_instance.cluster[0].public_ip
   }
 
   provisioner "remote-exec" {
     # Bootstrap script called with private_ip of each node in the cluster
     inline = [
-      "bootstrap-cluster.sh ${join(" ", aws_instance.cluster.*.private_ip)}",
+      "bootstrap-cluster.sh ${join(" ", aws_instance.cluster[*].private_ip)}",
     ]
   }
 }

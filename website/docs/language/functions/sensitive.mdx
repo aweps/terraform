@@ -3,6 +3,12 @@ page_title: sensitive - Functions - Configuration Language
 description: The sensitive function marks a value as being sensitive.
 ---
 
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+> [!IMPORTANT]  
+> **Documentation Update:** Product documentation previously located in `/website` has moved to the [`hashicorp/web-unified-docs`](https://github.com/hashicorp/web-unified-docs) repository, where all product documentation is now centralized. Please make contributions directly to `web-unified-docs`, since changes to `/website` in this repository will not appear on developer.hashicorp.com.
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+
+
 # `sensitive` Function
 
 -> **Note:** This function is only available in Terraform v0.15 and later.
@@ -20,7 +26,7 @@ The `sensitive` function might be useful in some less-common situations where a
 sensitive value arises from a definition _within_ your module, such as if you've
 loaded sensitive data from a file on disk as part of your configuration:
 
-```
+```hcl
 locals {
   sensitive_content = sensitive(file("${path.module}/sensitive.txt"))
 }

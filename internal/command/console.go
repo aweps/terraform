@@ -9,15 +9,15 @@ import (
 	"os"
 	"strings"
 
+	"github.com/hashicorp/cli"
+
 	"github.com/hashicorp/terraform/internal/addrs"
-	"github.com/hashicorp/terraform/internal/backend"
+	"github.com/hashicorp/terraform/internal/backend/backendrun"
 	"github.com/hashicorp/terraform/internal/command/arguments"
 	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/repl"
 	"github.com/hashicorp/terraform/internal/terraform"
 	"github.com/hashicorp/terraform/internal/tfdiags"
-
-	"github.com/mitchellh/cli"
 )
 
 // ConsoleCommand is a Command implementation that starts an interactive
@@ -62,7 +62,7 @@ func (c *ConsoleCommand) Run(args []string) int {
 
 	// Load the backend
 	b, backendDiags := c.Backend(&BackendOpts{
-		Config: backendConfig,
+		BackendConfig: backendConfig,
 	})
 	diags = diags.Append(backendDiags)
 	if backendDiags.HasErrors() {
@@ -71,7 +71,7 @@ func (c *ConsoleCommand) Run(args []string) int {
 	}
 
 	// We require a local backend
-	local, ok := b.(backend.Local)
+	local, ok := b.(backendrun.Local)
 	if !ok {
 		c.showDiagnostics(diags) // in case of any warnings in here
 		c.Ui.Error(ErrUnsupportedLocalOp)

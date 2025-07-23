@@ -14,6 +14,7 @@ import (
 	"github.com/hashicorp/terraform/internal/moduletest/mocking"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/providers"
+	testing_provider "github.com/hashicorp/terraform/internal/providers/testing"
 	"github.com/hashicorp/terraform/internal/states"
 )
 
@@ -88,9 +89,13 @@ output "id" {
 	value = test_instance.instance.id
 }`,
 			},
-			overrides: mocking.OverridesForTesting(func(overrides map[string]addrs.Map[addrs.Targetable, *configs.Override]) {
-				overrides["test"] = addrs.MakeMap[addrs.Targetable, *configs.Override]()
-				overrides["test"].Put(mustResourceInstanceAddr("test_instance.instance"), &configs.Override{
+			overrides: mocking.OverridesForTesting(func(overrides map[addrs.RootProviderConfig]addrs.Map[addrs.Targetable, *configs.Override]) {
+				overrides[addrs.RootProviderConfig{
+					Provider: addrs.NewDefaultProvider("test"),
+				}] = addrs.MakeMap[addrs.Targetable, *configs.Override]()
+				overrides[addrs.RootProviderConfig{
+					Provider: addrs.NewDefaultProvider("test"),
+				}].Put(mustResourceInstanceAddr("test_instance.instance"), &configs.Override{
 					Values: cty.ObjectVal(map[string]cty.Value{
 						"id": cty.StringVal("h3ll0"),
 					}),
@@ -135,16 +140,25 @@ output "secondary_id" {
 	value = test_instance.secondary.id
 }`,
 			},
-			overrides: mocking.OverridesForTesting(func(overrides map[string]addrs.Map[addrs.Targetable, *configs.Override]) {
-				overrides["test.secondary"] = addrs.MakeMap[addrs.Targetable, *configs.Override]()
+			overrides: mocking.OverridesForTesting(func(overrides map[addrs.RootProviderConfig]addrs.Map[addrs.Targetable, *configs.Override]) {
+				overrides[addrs.RootProviderConfig{
+					Provider: addrs.NewDefaultProvider("test"),
+					Alias:    "secondary",
+				}] = addrs.MakeMap[addrs.Targetable, *configs.Override]()
 				// Test should not apply this override, as this provider is
 				// not being used for this resource.
-				overrides["test.secondary"].Put(mustResourceInstanceAddr("test_instance.primary"), &configs.Override{
+				overrides[addrs.RootProviderConfig{
+					Provider: addrs.NewDefaultProvider("test"),
+					Alias:    "secondary",
+				}].Put(mustResourceInstanceAddr("test_instance.primary"), &configs.Override{
 					Values: cty.ObjectVal(map[string]cty.Value{
 						"id": cty.StringVal("primary_id"),
 					}),
 				})
-				overrides["test.secondary"].Put(mustResourceInstanceAddr("test_instance.secondary"), &configs.Override{
+				overrides[addrs.RootProviderConfig{
+					Provider: addrs.NewDefaultProvider("test"),
+					Alias:    "secondary",
+				}].Put(mustResourceInstanceAddr("test_instance.secondary"), &configs.Override{
 					Values: cty.ObjectVal(map[string]cty.Value{
 						"id": cty.StringVal("secondary_id"),
 					}),
@@ -199,9 +213,13 @@ output "id" {
 }
 `,
 			},
-			overrides: mocking.OverridesForTesting(func(overrides map[string]addrs.Map[addrs.Targetable, *configs.Override]) {
-				overrides["test"] = addrs.MakeMap[addrs.Targetable, *configs.Override]()
-				overrides["test"].Put(mustResourceInstanceAddr("module.mod.test_instance.instance"), &configs.Override{
+			overrides: mocking.OverridesForTesting(func(overrides map[addrs.RootProviderConfig]addrs.Map[addrs.Targetable, *configs.Override]) {
+				overrides[addrs.RootProviderConfig{
+					Provider: addrs.NewDefaultProvider("test"),
+				}] = addrs.MakeMap[addrs.Targetable, *configs.Override]()
+				overrides[addrs.RootProviderConfig{
+					Provider: addrs.NewDefaultProvider("test"),
+				}].Put(mustResourceInstanceAddr("module.mod.test_instance.instance"), &configs.Override{
 					Values: cty.ObjectVal(map[string]cty.Value{
 						"id": cty.StringVal("h3ll0"),
 					}),
@@ -243,9 +261,13 @@ output "id" {
 
 `,
 			},
-			overrides: mocking.OverridesForTesting(func(overrides map[string]addrs.Map[addrs.Targetable, *configs.Override]) {
-				overrides["test"] = addrs.MakeMap[addrs.Targetable, *configs.Override]()
-				overrides["test"].Put(mustResourceInstanceAddr("module.mod.test_instance.instance"), &configs.Override{
+			overrides: mocking.OverridesForTesting(func(overrides map[addrs.RootProviderConfig]addrs.Map[addrs.Targetable, *configs.Override]) {
+				overrides[addrs.RootProviderConfig{
+					Provider: addrs.NewDefaultProvider("test"),
+				}] = addrs.MakeMap[addrs.Targetable, *configs.Override]()
+				overrides[addrs.RootProviderConfig{
+					Provider: addrs.NewDefaultProvider("test"),
+				}].Put(mustResourceInstanceAddr("module.mod.test_instance.instance"), &configs.Override{
 					Values: cty.ObjectVal(map[string]cty.Value{
 						"id": cty.StringVal("h3ll0"),
 					}),
@@ -380,9 +402,13 @@ output "id" {
 
 `,
 			},
-			overrides: mocking.OverridesForTesting(func(overrides map[string]addrs.Map[addrs.Targetable, *configs.Override]) {
-				overrides["test"] = addrs.MakeMap[addrs.Targetable, *configs.Override]()
-				overrides["test"].Put(mustResourceInstanceAddr("module.mod.test_instance.instance"), &configs.Override{
+			overrides: mocking.OverridesForTesting(func(overrides map[addrs.RootProviderConfig]addrs.Map[addrs.Targetable, *configs.Override]) {
+				overrides[addrs.RootProviderConfig{
+					Provider: addrs.NewDefaultProvider("test"),
+				}] = addrs.MakeMap[addrs.Targetable, *configs.Override]()
+				overrides[addrs.RootProviderConfig{
+					Provider: addrs.NewDefaultProvider("test"),
+				}].Put(mustResourceInstanceAddr("module.mod.test_instance.instance"), &configs.Override{
 					Values: cty.ObjectVal(map[string]cty.Value{
 						"id": cty.StringVal("h3ll0"),
 					}),
@@ -565,6 +591,126 @@ output "id" {
 				}),
 			}),
 		},
+		"expansion inside overridden module": {
+			configs: map[string]string{
+				"main.tf": `
+module "test" {
+  source = "./mod"
+}
+`,
+				"mod/main.tf": `
+locals {
+  instances = 2
+  value = "Hello, world!"
+}
+
+resource "test_instance" "resource" {
+  count = local.instances
+  string = local.value
+}
+
+output "id" {
+  value = test_instance.resource[0].id
+}
+`,
+			},
+			overrides: mocking.OverridesForTesting(nil, func(overrides addrs.Map[addrs.Targetable, *configs.Override]) {
+				overrides.Put(mustModuleInstance("module.test"), &configs.Override{
+					Values: cty.ObjectVal(map[string]cty.Value{
+						"id": cty.StringVal("h3ll0"),
+					}),
+				})
+			}),
+			outputs: cty.EmptyObjectVal,
+		},
+		"expansion inside deeply nested overridden module": {
+			configs: map[string]string{
+				"main.tf": `
+module "test" {
+  source = "./child"
+}
+`,
+				"child/main.tf": `
+module "grandchild" {
+  source = "../grandchild"
+}
+
+locals {
+  instances = 2
+  value = "Hello, world!"
+}
+
+resource "test_instance" "resource" {
+  count = local.instances
+  string = local.value
+}
+
+output "id" {
+  value = test_instance.resource[0].id
+}
+`,
+				"grandchild/main.tf": `
+locals {
+  instances = 2
+  value = "Hello, world!"
+}
+
+resource "test_instance" "resource" {
+  count = local.instances
+  string = local.value
+}
+
+output "id" {
+  value = test_instance.resource[0].id
+}
+`,
+			},
+			overrides: mocking.OverridesForTesting(nil, func(overrides addrs.Map[addrs.Targetable, *configs.Override]) {
+				overrides.Put(mustModuleInstance("module.test"), &configs.Override{
+					Values: cty.ObjectVal(map[string]cty.Value{
+						"id": cty.StringVal("h3ll0"),
+					}),
+				})
+			}),
+			outputs: cty.EmptyObjectVal,
+		},
+		"legacy provider config inside overridden module": {
+			configs: map[string]string{
+				"main.tf": `
+module "test" {
+  source = "./child"
+}
+`,
+				"child/main.tf": `
+module "grandchild" {
+  source = "../grandchild"
+}
+output "id" {
+  value = "child"
+}
+`,
+				"grandchild/main.tf": `
+variable "in" {
+  default = "test_value"
+}
+
+provider "test" {
+  value = var.in
+}
+
+resource "test_instance" "resource" {
+}
+`,
+			},
+			overrides: mocking.OverridesForTesting(nil, func(overrides addrs.Map[addrs.Targetable, *configs.Override]) {
+				overrides.Put(mustModuleInstance("module.test"), &configs.Override{
+					Values: cty.ObjectVal(map[string]cty.Value{
+						"id": cty.StringVal("h3ll0"),
+					}),
+				})
+			}),
+			outputs: cty.EmptyObjectVal,
+		},
 	}
 	for name, tc := range tcs {
 		t.Run(name, func(t *testing.T) {
@@ -634,11 +780,21 @@ output "id" {
 // underlyingOverridesProvider returns a provider that always panics for
 // important calls. This is to validate the behaviour of the overrides
 // functionality, in that they should stop the provider from being executed.
-var underlyingOverridesProvider = &MockProvider{
+var underlyingOverridesProvider = &testing_provider.MockProvider{
 	GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
+		Provider: providers.Schema{
+			Body: &configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"value": {
+						Type:     cty.String,
+						Optional: true,
+					},
+				},
+			},
+		},
 		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"id": {
 							Type:     cty.String,
@@ -654,7 +810,7 @@ var underlyingOverridesProvider = &MockProvider{
 		},
 		DataSources: map[string]providers.Schema{
 			"test_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"id": {
 							Type:     cty.String,

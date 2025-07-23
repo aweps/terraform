@@ -1,13 +1,19 @@
 ---
-page_title: 'Command: console'
+page_title: terraform console command reference
 description: >-
-  The terraform console command provides an interactive console for evaluating
+  The `terraform console` command opens an interactive console for evaluating
   expressions.
 ---
 
-# Command: console
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+> [!IMPORTANT]  
+> **Documentation Update:** Product documentation previously located in `/website` has moved to the [`hashicorp/web-unified-docs`](https://github.com/hashicorp/web-unified-docs) repository, where all product documentation is now centralized. Please make contributions directly to `web-unified-docs`, since changes to `/website` in this repository will not appear on developer.hashicorp.com.
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
 
-The `terraform console` command provides an interactive console for
+
+# `terraform console` command
+
+The `terraform console` command opens an interactive console for
 evaluating [expressions](/terraform/language/expressions).
 
 ## Usage
@@ -25,9 +31,9 @@ To close the console, enter the `exit` command or press Control-C
 or Control-D.
 
 For configurations using
-[the `local` backend](/terraform/language/settings/backends/local) only,
+[the `local` backend](/terraform/language/backend/local) only,
 `terraform console` accepts the legacy command line option
-[`-state`](/terraform/language/settings/backends/local#command-line-arguments).
+[`-state`](/terraform/language/backend/local#command-line-arguments).
 
 ## Scripting
 

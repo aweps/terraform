@@ -29,6 +29,12 @@ const (
 	MessageRefreshStart      MessageType = "refresh_start"
 	MessageRefreshComplete   MessageType = "refresh_complete"
 
+	// Ephemeral operation messages
+	MessageEphemeralOpStart    MessageType = "ephemeral_op_start"
+	MessageEphemeralOpProgress MessageType = "ephemeral_op_progress"
+	MessageEphemeralOpComplete MessageType = "ephemeral_op_complete"
+	MessageEphemeralOpErrored  MessageType = "ephemeral_op_errored"
+
 	// Test messages
 	MessageTestAbstract  MessageType = "test_abstract"
 	MessageTestFile      MessageType = "test_file"
@@ -40,4 +46,14 @@ const (
 	MessageTestInterrupt MessageType = "test_interrupt"
 	MessageTestStatus    MessageType = "test_status"
 	MessageTestRetry     MessageType = "test_retry"
+
+	// List messages
+	MessageListStart         MessageType = "list_start"
+	MessageListResourceFound MessageType = "list_resource_found"
+
+	// Action messages
+	MessageActionStart    MessageType = "action_start"
+	MessageActionProgress MessageType = "action_progress"
+	MessageActionComplete MessageType = "action_complete"
+	MessageActionErrored  MessageType = "action_errored"
 )

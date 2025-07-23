@@ -6,6 +6,12 @@ description: >-
   arguments.
 ---
 
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+> [!IMPORTANT]  
+> **Documentation Update:** Product documentation previously located in `/website` has moved to the [`hashicorp/web-unified-docs`](https://github.com/hashicorp/web-unified-docs) repository, where all product documentation is now centralized. Please make contributions directly to `web-unified-docs`, since changes to `/website` in this repository will not appear on developer.hashicorp.com.
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+
+
 # Resource Blocks
 
 > **Hands-on:** Try the [Terraform: Get Started](/terraform/tutorials/aws-get-started?utm_source=WEBSITE&utm_medium=WEB_IO&utm_offer=ARTICLE_PAGE&utm_content=DOCS) tutorials.
@@ -136,6 +142,25 @@ removed {
 The `from` argument is the address of the resource you want to remove, without any instance keys (such as "aws_instance.example[1]").
 
 The `lifecycle` block is required. The `destroy` argument determines whether Terraform will attempt to destroy the object managed by the resource or not. A value of `false` means that Terraform will remove the resource from state without destroying it.
+
+A `removed` block may also contain a [Destroy-Time Provisioner](/terraform/language/resources/provisioners/syntax#destroy-time-provisioners), so that the provisioner can remain in the configuration even though the `resource` block has been removed.
+
+```hcl
+removed {
+  from = aws_instance.example
+
+  lifecycle {
+    destroy = true
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = "echo 'Instance ${self.id} has been destroyed.'"
+  }
+}
+```
+
+The same referencing rules apply as in normal destroy-time provisioners, with only `count.index`, `each.key`, and `self` allowed. The provisioner must specify `when = destroy`, and the `removed` block must use `destroy = true` in order for the provisioner to execute.
 
 ## Custom Condition Checks
 

@@ -12,11 +12,12 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/hashicorp/cli"
+	"github.com/zclconf/go-cty/cty"
+
 	"github.com/hashicorp/terraform/internal/configs/configschema"
 	"github.com/hashicorp/terraform/internal/providers"
-	"github.com/hashicorp/terraform/internal/terraform"
-	"github.com/mitchellh/cli"
-	"github.com/zclconf/go-cty/cty"
+	testing_provider "github.com/hashicorp/terraform/internal/providers/testing"
 )
 
 func TestProvidersSchema_error(t *testing.T) {
@@ -49,7 +50,7 @@ func TestProvidersSchema_output(t *testing.T) {
 			td := t.TempDir()
 			inputDir := filepath.Join(fixtureDir, entry.Name())
 			testCopyDir(t, inputDir, td)
-			defer testChdir(t, td)()
+			t.Chdir(td)
 
 			providerSource, close := newMockProviderSource(t, map[string][]string{
 				"test": {"1.2.3"},
@@ -58,9 +59,11 @@ func TestProvidersSchema_output(t *testing.T) {
 
 			p := providersSchemaFixtureProvider()
 			ui := new(cli.MockUi)
+			view, done := testView(t)
 			m := Meta{
 				testingOverrides: metaOverridesForProvider(p),
 				Ui:               ui,
+				View:             view,
 				ProviderSource:   providerSource,
 			}
 
@@ -69,11 +72,8 @@ func TestProvidersSchema_output(t *testing.T) {
 				Meta: m,
 			}
 			if code := ic.Run([]string{}); code != 0 {
-				t.Fatalf("init failed\n%s", ui.ErrorWriter)
+				t.Fatalf("init failed\n%s", done(t).Stderr())
 			}
-
-			// flush the init output from the mock ui
-			ui.OutputWriter.Reset()
 
 			// `terraform provider schemas` command
 			pc := &ProvidersSchemaCommand{Meta: m}
@@ -116,7 +116,7 @@ type providerSchema struct {
 
 // testProvider returns a mock provider that is configured for basic
 // operation with the configuration in testdata/providers-schema.
-func providersSchemaFixtureProvider() *terraform.MockProvider {
+func providersSchemaFixtureProvider() *testing_provider.MockProvider {
 	p := testProvider()
 	p.GetProviderSchemaResponse = providersSchemaFixtureSchema()
 	return p
@@ -127,7 +127,7 @@ func providersSchemaFixtureProvider() *terraform.MockProvider {
 func providersSchemaFixtureSchema() *providers.GetProviderSchemaResponse {
 	return &providers.GetProviderSchemaResponse{
 		Provider: providers.Schema{
-			Block: &configschema.Block{
+			Body: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
 					"region": {Type: cty.String, Optional: true},
 				},
@@ -135,7 +135,7 @@ func providersSchemaFixtureSchema() *providers.GetProviderSchemaResponse {
 		},
 		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"id":  {Type: cty.String, Optional: true, Computed: true},
 						"ami": {Type: cty.String, Optional: true},

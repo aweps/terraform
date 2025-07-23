@@ -9,12 +9,15 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hcltest"
+	"github.com/zclconf/go-cty/cty"
+
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/providers"
+	testing_provider "github.com/hashicorp/terraform/internal/providers/testing"
 	"github.com/hashicorp/terraform/internal/states"
-	"github.com/zclconf/go-cty/cty"
+	"github.com/hashicorp/terraform/internal/tfdiags"
 )
 
 func TestContextEval(t *testing.T) {
@@ -132,7 +135,7 @@ output "out" {
 	_, diags := ctx.Eval(m, states.NewState(), addrs.RootModuleInstance, &EvalOpts{
 		SetVariables: testInputValuesUnset(m.Module.Variables),
 	})
-	assertNoErrors(t, diags)
+	tfdiags.AssertNoErrors(t, diags)
 }
 
 func TestContextPlanAndEval(t *testing.T) {
@@ -142,11 +145,11 @@ func TestContextPlanAndEval(t *testing.T) {
 	// can use to evaluate arbitrary expressions.
 
 	m := testModule(t, "planandeval-basic")
-	p := &MockProvider{
+	p := &testing_provider.MockProvider{
 		GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
 			ResourceTypes: map[string]providers.Schema{
 				"test_thing": {
-					Block: &configschema.Block{
+					Body: &configschema.Block{
 						Attributes: map[string]*configschema.Attribute{
 							"arg": {
 								Type:     cty.String,
@@ -172,7 +175,7 @@ func TestContextPlanAndEval(t *testing.T) {
 			},
 		},
 	})
-	assertNoDiagnostics(t, diags)
+	tfdiags.AssertNoDiagnostics(t, diags)
 
 	// This test isn't really about whether the plan is correct, but we'll
 	// do some basic checks on it anyway because if the plan is incorrect
@@ -193,13 +196,6 @@ func TestContextPlanAndEval(t *testing.T) {
 	} else {
 		t.Fatalf("plan has no Changes")
 	}
-	if plan.PlannedState != nil {
-		if rs := plan.PlannedState.ResourceInstance(riAddr); rs == nil {
-			t.Errorf("planned satte does not include test_thing.a")
-		}
-	} else {
-		t.Fatalf("plan has no PlannedState")
-	}
 	if plan.PriorState == nil {
 		t.Fatalf("plan has no PriorState")
 	}
@@ -217,7 +213,7 @@ func TestContextPlanAndEval(t *testing.T) {
 		expr := hcltest.MockExprTraversalSrc(`var.a`)
 		want := cty.StringVal("a value")
 		got, diags := scope.EvalExpr(expr, cty.String)
-		assertNoDiagnostics(t, diags)
+		tfdiags.AssertNoDiagnostics(t, diags)
 
 		if !want.RawEquals(got) {
 			t.Errorf("wrong result\ngot:  %#v\nwant: %#v", got, want)
@@ -229,7 +225,7 @@ func TestContextPlanAndEval(t *testing.T) {
 			"arg": cty.StringVal("a value"),
 		})
 		got, diags := scope.EvalExpr(expr, cty.DynamicPseudoType)
-		assertNoDiagnostics(t, diags)
+		tfdiags.AssertNoDiagnostics(t, diags)
 
 		if !want.RawEquals(got) {
 			t.Errorf("wrong result\ngot:  %#v\nwant: %#v", got, want)
@@ -244,11 +240,11 @@ func TestContextApplyAndEval(t *testing.T) {
 	// caller can use to evaluate arbitrary expressions.
 
 	m := testModule(t, "planandeval-basic")
-	p := &MockProvider{
+	p := &testing_provider.MockProvider{
 		GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
 			ResourceTypes: map[string]providers.Schema{
 				"test_thing": {
-					Block: &configschema.Block{
+					Body: &configschema.Block{
 						Attributes: map[string]*configschema.Attribute{
 							"arg": {
 								Type:     cty.String,
@@ -274,7 +270,7 @@ func TestContextApplyAndEval(t *testing.T) {
 			},
 		},
 	})
-	assertNoDiagnostics(t, diags)
+	tfdiags.AssertNoDiagnostics(t, diags)
 
 	// This test isn't really about whether the plan is correct, but we'll
 	// do some basic checks on it anyway because if the plan is incorrect
@@ -295,13 +291,6 @@ func TestContextApplyAndEval(t *testing.T) {
 	} else {
 		t.Fatalf("plan has no Changes")
 	}
-	if plan.PlannedState != nil {
-		if rs := plan.PlannedState.ResourceInstance(riAddr); rs == nil {
-			t.Errorf("planned satte does not include test_thing.a")
-		}
-	} else {
-		t.Fatalf("plan has no PlannedState")
-	}
 	if plan.PriorState == nil {
 		t.Fatalf("plan has no PriorState")
 	}
@@ -310,7 +299,7 @@ func TestContextApplyAndEval(t *testing.T) {
 	}
 
 	finalState, scope, diags := ctx.ApplyAndEval(plan, m, nil)
-	assertNoDiagnostics(t, diags)
+	tfdiags.AssertNoDiagnostics(t, diags)
 	if finalState == nil {
 		t.Fatalf("no final state")
 	}
@@ -325,7 +314,7 @@ func TestContextApplyAndEval(t *testing.T) {
 		expr := hcltest.MockExprTraversalSrc(`var.a`)
 		want := cty.StringVal("a value")
 		got, diags := scope.EvalExpr(expr, cty.String)
-		assertNoDiagnostics(t, diags)
+		tfdiags.AssertNoDiagnostics(t, diags)
 
 		if !want.RawEquals(got) {
 			t.Errorf("wrong result\ngot:  %#v\nwant: %#v", got, want)
@@ -337,10 +326,52 @@ func TestContextApplyAndEval(t *testing.T) {
 			"arg": cty.StringVal("a value"),
 		})
 		got, diags := scope.EvalExpr(expr, cty.DynamicPseudoType)
-		assertNoDiagnostics(t, diags)
+		tfdiags.AssertNoDiagnostics(t, diags)
 
 		if !want.RawEquals(got) {
 			t.Errorf("wrong result\ngot:  %#v\nwant: %#v", got, want)
 		}
 	})
+}
+
+func TestContextEval_ephemeralResource(t *testing.T) {
+	// make sure referenced to ephemeral resources are st least valid in the
+	// console, even if they are not known
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+ephemeral "ephem_resource" "data" {}
+
+locals {
+  composedString = "prefix-${ephemeral.ephem_resource.data.value}-suffix"
+}
+  `,
+	})
+
+	p := &testing_provider.MockProvider{
+		GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
+			EphemeralResourceTypes: map[string]providers.Schema{
+				"ephem_resource": {
+					Body: &configschema.Block{
+						Attributes: map[string]*configschema.Attribute{
+							"value": {
+								Type:     cty.String,
+								Computed: true,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("ephem"): testProviderFuncFixed(p),
+		},
+	})
+
+	_, diags := ctx.Eval(m, states.NewState(), addrs.RootModuleInstance, &EvalOpts{
+		SetVariables: testInputValuesUnset(m.Module.Variables),
+	})
+	tfdiags.AssertNoErrors(t, diags)
 }

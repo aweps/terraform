@@ -8,7 +8,9 @@ import (
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs"
+	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/providers"
+	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/tfdiags"
 )
 
@@ -24,14 +26,31 @@ import (
 // here are somewhat vague to accommodate being used both to describe
 // an invalid component configuration and the problem of trying to plan and
 // apply a module that wasn't intended to be a root module.
-func checkExternalProviders(rootCfg *configs.Config, got map[addrs.RootProviderConfig]providers.Interface) tfdiags.Diagnostics {
+func checkExternalProviders(rootCfg *configs.Config, plan *plans.Plan, state *states.State, got map[addrs.RootProviderConfig]providers.Interface) tfdiags.Diagnostics {
 	var diags tfdiags.Diagnostics
 
-	allowedProviders := map[addrs.Provider]struct{}{}
+	allowedProviders := make(map[addrs.Provider]bool)
 	for _, addr := range rootCfg.ProviderTypes() {
-		allowedProviders[addr] = struct{}{}
+		allowedProviders[addr] = true
 	}
-	requiredConfigs := rootCfg.EffectiveRequiredProviderConfigs()
+	if state != nil {
+		for _, addr := range state.ProviderAddrs() {
+			allowedProviders[addr.Provider] = true
+		}
+	}
+	if plan != nil {
+		for _, addr := range plan.ProviderAddrs() {
+			allowedProviders[addr.Provider] = true
+		}
+	}
+	requiredConfigs := rootCfg.EffectiveRequiredProviderConfigs().Keys()
+	definedProviders := make(map[addrs.RootProviderConfig]bool)
+	for _, pc := range rootCfg.Module.ProviderConfigs {
+		definedProviders[addrs.RootProviderConfig{
+			Provider: rootCfg.Module.ProviderForLocalConfig(pc.Addr()),
+			Alias:    pc.Addr().Alias,
+		}] = true
+	}
 
 	// Passed-in provider configurations can only be for providers that this
 	// configuration actually contains some use of.
@@ -39,13 +58,13 @@ func checkExternalProviders(rootCfg *configs.Config, got map[addrs.RootProviderC
 	// we can't be precise because Terraform permits implicit default provider
 	// configurations.)
 	for cfgAddr := range got {
-		if _, allowed := allowedProviders[cfgAddr.Provider]; !allowed {
+		if !allowedProviders[cfgAddr.Provider] {
 			diags = diags.Append(tfdiags.Sourceless(
 				tfdiags.Error,
 				"Unexpected provider configuration",
 				fmt.Sprintf("The plan options include a configuration for provider %s, which is not used anywhere in this configuration.", cfgAddr.Provider),
 			))
-		} else if cfgAddr.Alias != "" && !requiredConfigs.Has(cfgAddr) {
+		} else if _, exists := definedProviders[cfgAddr]; !exists && (cfgAddr.Alias != "" && !requiredConfigs.Has(cfgAddr)) {
 			// Additional (aliased) provider configurations must always be
 			// explicitly declared.
 			diags = diags.Append(tfdiags.Sourceless(
@@ -55,7 +74,6 @@ func checkExternalProviders(rootCfg *configs.Config, got map[addrs.RootProviderC
 			))
 		}
 	}
-
 	// The caller _must_ pass external provider configurations for any address
 	// that's been explicitly declared as required in the required_providers
 	// block.
@@ -77,25 +95,6 @@ func checkExternalProviders(rootCfg *configs.Config, got map[addrs.RootProviderC
 					),
 				))
 			}
-		}
-	}
-
-	// It isn't valid to pass in a provider for an address that is associated
-	// with an explicit "provider" block in the root module, since that would
-	// make it ambiguous whether we're using the passed in one or the declared
-	// one.
-	for _, pc := range rootCfg.Module.ProviderConfigs {
-		absAddr := rootCfg.ResolveAbsProviderAddr(pc.Addr(), addrs.RootModule)
-		rootAddr := addrs.RootProviderConfig{
-			Provider: absAddr.Provider,
-			Alias:    absAddr.Alias,
-		}
-		if _, defined := got[rootAddr]; defined {
-			diags = diags.Append(tfdiags.Sourceless(
-				tfdiags.Error,
-				"Unexpected provider configuration",
-				fmt.Sprintf("The plan options include provider configuration %s, but that conflicts with the explicitly-defined provider configuration at %s.", rootAddr, pc.DeclRange.String()),
-			))
 		}
 	}
 

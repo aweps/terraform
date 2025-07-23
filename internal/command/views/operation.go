@@ -92,7 +92,7 @@ func (v *OperationHuman) EmergencyDumpState(stateFile *statefile.File) error {
 }
 
 func (v *OperationHuman) Plan(plan *plans.Plan, schemas *terraform.Schemas) {
-	outputs, changed, drift, attrs, err := jsonplan.MarshalForRenderer(plan, schemas)
+	outputs, changed, drift, attrs, actions, err := jsonplan.MarshalForRenderer(plan, schemas)
 	if err != nil {
 		v.view.streams.Eprintf("Failed to marshal plan to json: %s", err)
 		return
@@ -110,17 +110,22 @@ func (v *OperationHuman) Plan(plan *plans.Plan, schemas *terraform.Schemas) {
 		OutputChanges:         outputs,
 		ResourceChanges:       changed,
 		ResourceDrift:         drift,
-		ProviderSchemas:       jsonprovider.MarshalForRenderer(schemas),
+		ProviderSchemas:       jsonprovider.MarshalForRenderer(schemas, false),
 		RelevantAttributes:    attrs,
+		ActionInvocations:     actions,
 	}
 
 	// Side load some data that we can't extract from the JSON plan.
 	var opts []plans.Quality
-	if !plan.CanApply() {
-		opts = append(opts, plans.NoChanges)
-	}
 	if plan.Errored {
 		opts = append(opts, plans.Errored)
+	} else if !plan.Applyable {
+		// FIXME: There might be other reasons for "non-applyable" in future,
+		// so maybe we should check plan.Changes.IsEmpty here and use a more
+		// generic fallback message if the plan doesn't seem to be empty.
+		// There are currently no other cases though, so we'll keep it
+		// simple for now.
+		opts = append(opts, plans.NoChanges)
 	}
 
 	renderer.RenderHumanPlan(jplan, plan.UIMode, opts...)
@@ -142,26 +147,26 @@ func (v *OperationHuman) PlanNextStep(planPath string, genConfigPath string) {
 	v.view.outputHorizRule()
 
 	if genConfigPath != "" {
-		v.view.streams.Printf(
+		v.view.streams.Println(
 			format.WordWrap(
 				"\n"+strings.TrimSpace(fmt.Sprintf(planHeaderGenConfig, genConfigPath)),
 				v.view.outputColumns(),
-			) + "\n")
+			))
 	}
 
 	if planPath == "" {
-		v.view.streams.Print(
+		v.view.streams.Println(
 			format.WordWrap(
 				"\n"+strings.TrimSpace(planHeaderNoOutput),
 				v.view.outputColumns(),
-			) + "\n",
+			),
 		)
 	} else {
-		v.view.streams.Printf(
+		v.view.streams.Println(
 			format.WordWrap(
 				"\n"+strings.TrimSpace(fmt.Sprintf(planHeaderYesOutput, planPath, planPath)),
 				v.view.outputColumns(),
-			) + "\n",
+			),
 		)
 	}
 }

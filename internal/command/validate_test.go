@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/mitchellh/cli"
+	"github.com/hashicorp/cli"
 	"github.com/zclconf/go-cty/cty"
 
 	testing_command "github.com/hashicorp/terraform/internal/command/testing"
@@ -28,7 +28,7 @@ func setupTest(t *testing.T, fixturepath string, args ...string) (*terminal.Test
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"ami": {Type: cty.String, Optional: true},
 					},
@@ -73,7 +73,7 @@ func TestValidateCommandWithTfvarsFile(t *testing.T) {
 	// requires scanning the current working directory by validate command.
 	td := t.TempDir()
 	testCopyDir(t, testFixturePath("validate-valid/with-tfvars-file"), td)
-	defer testChdir(t, td)()
+	t.Chdir(td)
 
 	view, done := testView(t)
 	c := &ValidateCommand{
@@ -260,7 +260,7 @@ func TestValidateWithInvalidTestModule(t *testing.T) {
 
 	td := t.TempDir()
 	testCopyDir(t, testFixturePath(path.Join("test", "invalid-module")), td)
-	defer testChdir(t, td)()
+	t.Chdir(td)
 
 	streams, done := terminal.StreamsForTesting(t)
 	view := views.NewView(streams)
@@ -317,7 +317,7 @@ func TestValidateWithInvalidOverrides(t *testing.T) {
 
 	td := t.TempDir()
 	testCopyDir(t, testFixturePath(path.Join("test", "invalid-overrides")), td)
-	defer testChdir(t, td)()
+	t.Chdir(td)
 
 	streams, done := terminal.StreamsForTesting(t)
 	view := views.NewView(streams)
@@ -342,9 +342,15 @@ func TestValidateWithInvalidOverrides(t *testing.T) {
 		Meta: meta,
 	}
 
+	output := done(t)
 	if code := init.Run(nil); code != 0 {
-		t.Fatalf("expected status code 0 but got %d: %s", code, ui.ErrorWriter)
+		t.Fatalf("expected status code 0 but got %d: %s", code, output.All())
 	}
+
+	// reset streams for next command
+	streams, done = terminal.StreamsForTesting(t)
+	meta.View = views.NewView(streams)
+	meta.Streams = streams
 
 	c := &ValidateCommand{
 		Meta: meta,
@@ -354,7 +360,7 @@ func TestValidateWithInvalidOverrides(t *testing.T) {
 	args = append(args, "-no-color")
 
 	code := c.Run(args)
-	output := done(t)
+	output = done(t)
 
 	if code != 0 {
 		t.Errorf("Should have passed: %d\n\n%s", code, output.Stderr())

@@ -69,7 +69,7 @@ func (n *NodeApplyableProvider) ValidateProvider(ctx EvalContext, provider provi
 		return diags
 	}
 
-	configSchema := schemaResp.Provider.Block
+	configSchema := schemaResp.Provider.Body
 	if configSchema == nil {
 		// Should never happen in real code, but often comes up in tests where
 		// mock schemas are being used that tend to be incomplete.
@@ -111,10 +111,20 @@ func (n *NodeApplyableProvider) ConfigureProvider(ctx EvalContext, provider prov
 		return diags
 	}
 
-	configSchema := resp.Provider.Block
+	configSchema := resp.Provider.Body
 	configVal, configBody, evalDiags := ctx.EvaluateBlock(configBody, configSchema, nil, EvalDataForNoInstanceKey)
 	diags = diags.Append(evalDiags)
 	if evalDiags.HasErrors() {
+		if config == nil {
+			// The error messages from the above evaluation will be confusing
+			// if there isn't an explicit "provider" block in the configuration.
+			// Add some detail to the error message in this case.
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Invalid provider configuration",
+				fmt.Sprintf(providerConfigErr, n.Addr.Provider),
+			))
+		}
 		return diags
 	}
 

@@ -6,14 +6,20 @@ package terraform
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/zclconf/go-cty/cty"
+
+	"github.com/hashicorp/hcl/v2"
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
 	"github.com/hashicorp/terraform/internal/providers"
+	testing_provider "github.com/hashicorp/terraform/internal/providers/testing"
 	"github.com/hashicorp/terraform/internal/provisioners"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/tfdiags"
@@ -21,7 +27,7 @@ import (
 
 func TestContext2Validate_badCount(t *testing.T) {
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"aws_instance": {
 				Attributes: map[string]*configschema.Attribute{},
@@ -36,7 +42,7 @@ func TestContext2Validate_badCount(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
 	}
@@ -44,7 +50,7 @@ func TestContext2Validate_badCount(t *testing.T) {
 
 func TestContext2Validate_badResource_reference(t *testing.T) {
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"aws_instance": {
 				Attributes: map[string]*configschema.Attribute{},
@@ -59,7 +65,7 @@ func TestContext2Validate_badResource_reference(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
 	}
@@ -67,7 +73,7 @@ func TestContext2Validate_badResource_reference(t *testing.T) {
 
 func TestContext2Validate_badVar(t *testing.T) {
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"aws_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -85,7 +91,7 @@ func TestContext2Validate_badVar(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
 	}
@@ -117,7 +123,7 @@ func TestContext2Validate_computedVar(t *testing.T) {
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		Provider: providers.Schema{
-			Block: &configschema.Block{
+			Body: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
 					"value": {Type: cty.String, Optional: true},
 				},
@@ -125,7 +131,7 @@ func TestContext2Validate_computedVar(t *testing.T) {
 		},
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{},
 				},
 			},
@@ -135,7 +141,7 @@ func TestContext2Validate_computedVar(t *testing.T) {
 	pt.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"id":    {Type: cty.String, Computed: true},
 						"value": {Type: cty.String, Optional: true},
@@ -162,7 +168,7 @@ func TestContext2Validate_computedVar(t *testing.T) {
 		return
 	}
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -176,7 +182,7 @@ func TestContext2Validate_computedInFunction(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"attr": {Type: cty.Number, Optional: true},
 					},
@@ -185,7 +191,7 @@ func TestContext2Validate_computedInFunction(t *testing.T) {
 		},
 		DataSources: map[string]providers.Schema{
 			"aws_data_source": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"optional_attr": {Type: cty.String, Optional: true},
 						"computed":      {Type: cty.String, Computed: true},
@@ -202,7 +208,7 @@ func TestContext2Validate_computedInFunction(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -216,14 +222,14 @@ func TestContext2Validate_countComputed(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{},
 				},
 			},
 		},
 		DataSources: map[string]providers.Schema{
 			"aws_data_source": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"compute": {Type: cty.String, Optional: true},
 						"value":   {Type: cty.String, Computed: true},
@@ -240,7 +246,7 @@ func TestContext2Validate_countComputed(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -251,7 +257,7 @@ func TestContext2Validate_countNegative(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{},
 				},
 			},
@@ -264,7 +270,7 @@ func TestContext2Validate_countNegative(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
 	}
@@ -275,7 +281,7 @@ func TestContext2Validate_countVariable(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -290,7 +296,7 @@ func TestContext2Validate_countVariable(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -302,7 +308,7 @@ func TestContext2Validate_countVariableNoDefault(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -315,7 +321,7 @@ func TestContext2Validate_countVariableNoDefault(t *testing.T) {
 			addrs.NewDefaultProvider("aws"): testProviderFuncFixed(p),
 		},
 	})
-	assertNoDiagnostics(t, diags)
+	tfdiags.AssertNoDiagnostics(t, diags)
 
 	_, diags = c.Plan(m, nil, &PlanOpts{})
 	if !diags.HasErrors() {
@@ -329,7 +335,7 @@ func TestContext2Validate_moduleBadOutput(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -344,7 +350,7 @@ func TestContext2Validate_moduleBadOutput(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
 	}
@@ -355,7 +361,7 @@ func TestContext2Validate_moduleGood(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -370,7 +376,7 @@ func TestContext2Validate_moduleGood(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -382,7 +388,7 @@ func TestContext2Validate_moduleBadResource(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{},
 				},
 			},
@@ -399,7 +405,7 @@ func TestContext2Validate_moduleBadResource(t *testing.T) {
 		Diagnostics: tfdiags.Diagnostics{}.Append(fmt.Errorf("bad")),
 	}
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
 	}
@@ -411,7 +417,7 @@ func TestContext2Validate_moduleDepsShouldNotCycle(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"id": {Type: cty.String, Optional: true},
 					},
@@ -426,7 +432,7 @@ func TestContext2Validate_moduleDepsShouldNotCycle(t *testing.T) {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -437,7 +443,7 @@ func TestContext2Validate_moduleProviderVar(t *testing.T) {
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		Provider: providers.Schema{
-			Block: &configschema.Block{
+			Body: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
 					"foo": {Type: cty.String, Optional: true},
 				},
@@ -445,7 +451,7 @@ func TestContext2Validate_moduleProviderVar(t *testing.T) {
 		},
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -467,7 +473,7 @@ func TestContext2Validate_moduleProviderVar(t *testing.T) {
 		return
 	}
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -478,7 +484,7 @@ func TestContext2Validate_moduleProviderInheritUnused(t *testing.T) {
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		Provider: providers.Schema{
-			Block: &configschema.Block{
+			Body: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
 					"foo": {Type: cty.String, Optional: true},
 				},
@@ -486,7 +492,7 @@ func TestContext2Validate_moduleProviderInheritUnused(t *testing.T) {
 		},
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -508,7 +514,7 @@ func TestContext2Validate_moduleProviderInheritUnused(t *testing.T) {
 		return
 	}
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -519,7 +525,7 @@ func TestContext2Validate_orphans(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 						"num": {Type: cty.String, Optional: true},
@@ -547,7 +553,7 @@ func TestContext2Validate_orphans(t *testing.T) {
 		}
 	}
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -558,7 +564,7 @@ func TestContext2Validate_providerConfig_bad(t *testing.T) {
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		Provider: providers.Schema{
-			Block: &configschema.Block{
+			Body: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
 					"foo": {Type: cty.String, Optional: true},
 				},
@@ -566,7 +572,7 @@ func TestContext2Validate_providerConfig_bad(t *testing.T) {
 		},
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{},
 				},
 			},
@@ -583,7 +589,7 @@ func TestContext2Validate_providerConfig_bad(t *testing.T) {
 		Diagnostics: tfdiags.Diagnostics{}.Append(fmt.Errorf("bad")),
 	}
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if len(diags) != 1 {
 		t.Fatalf("wrong number of diagnostics %d; want %d", len(diags), 1)
 	}
@@ -597,7 +603,7 @@ func TestContext2Validate_providerConfig_skippedEmpty(t *testing.T) {
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		Provider: providers.Schema{
-			Block: &configschema.Block{
+			Body: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
 					"foo": {Type: cty.String, Optional: true},
 				},
@@ -605,7 +611,7 @@ func TestContext2Validate_providerConfig_skippedEmpty(t *testing.T) {
 		},
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{},
 				},
 			},
@@ -622,7 +628,7 @@ func TestContext2Validate_providerConfig_skippedEmpty(t *testing.T) {
 		Diagnostics: tfdiags.Diagnostics{}.Append(fmt.Errorf("should not be called")),
 	}
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -633,7 +639,7 @@ func TestContext2Validate_providerConfig_good(t *testing.T) {
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		Provider: providers.Schema{
-			Block: &configschema.Block{
+			Body: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
 					"foo": {Type: cty.String, Optional: true},
 				},
@@ -641,7 +647,7 @@ func TestContext2Validate_providerConfig_good(t *testing.T) {
 		},
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{},
 				},
 			},
@@ -654,7 +660,7 @@ func TestContext2Validate_providerConfig_good(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -668,7 +674,7 @@ func TestContext2Validate_requiredProviderConfig(t *testing.T) {
 
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		Provider: providers.Schema{
-			Block: &configschema.Block{
+			Body: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
 					"required_attribute": {Type: cty.String, Required: true},
 				},
@@ -676,7 +682,7 @@ func TestContext2Validate_requiredProviderConfig(t *testing.T) {
 		},
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{},
 				},
 			},
@@ -689,7 +695,7 @@ func TestContext2Validate_requiredProviderConfig(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -701,7 +707,7 @@ func TestContext2Validate_provisionerConfig_bad(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -725,7 +731,7 @@ func TestContext2Validate_provisionerConfig_bad(t *testing.T) {
 		Diagnostics: tfdiags.Diagnostics{}.Append(fmt.Errorf("bad")),
 	}
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
 	}
@@ -737,7 +743,7 @@ func TestContext2Validate_badResourceConnection(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -757,7 +763,7 @@ func TestContext2Validate_badResourceConnection(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	t.Log(diags.Err())
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
@@ -770,7 +776,7 @@ func TestContext2Validate_badProvisionerConnection(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -790,7 +796,7 @@ func TestContext2Validate_badProvisionerConnection(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	t.Log(diags.Err())
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
@@ -802,7 +808,7 @@ func TestContext2Validate_provisionerConfig_good(t *testing.T) {
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		Provider: providers.Schema{
-			Block: &configschema.Block{
+			Body: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
 					"foo": {Type: cty.String, Optional: true},
 				},
@@ -810,7 +816,7 @@ func TestContext2Validate_provisionerConfig_good(t *testing.T) {
 		},
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -839,7 +845,7 @@ func TestContext2Validate_provisionerConfig_good(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -851,7 +857,7 @@ func TestContext2Validate_requiredVar(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"ami": {Type: cty.String, Optional: true},
 					},
@@ -864,7 +870,7 @@ func TestContext2Validate_requiredVar(t *testing.T) {
 			addrs.NewDefaultProvider("aws"): testProviderFuncFixed(p),
 		},
 	})
-	assertNoDiagnostics(t, diags)
+	tfdiags.AssertNoDiagnostics(t, diags)
 
 	// NOTE: This test has grown idiosyncratic because originally Terraform
 	// would (optionally) check variables during validation, and then in
@@ -887,7 +893,7 @@ func TestContext2Validate_resourceConfig_bad(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -905,7 +911,7 @@ func TestContext2Validate_resourceConfig_bad(t *testing.T) {
 		Diagnostics: tfdiags.Diagnostics{}.Append(fmt.Errorf("bad")),
 	}
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
 	}
@@ -917,7 +923,7 @@ func TestContext2Validate_resourceConfig_good(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -931,7 +937,7 @@ func TestContext2Validate_resourceConfig_good(t *testing.T) {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -942,7 +948,7 @@ func TestContext2Validate_tainted(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 						"num": {Type: cty.String, Optional: true},
@@ -969,7 +975,7 @@ func TestContext2Validate_tainted(t *testing.T) {
 		}
 	}
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -982,7 +988,7 @@ func TestContext2Validate_targetedDestroy(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 						"num": {Type: cty.String, Optional: true},
@@ -1006,7 +1012,7 @@ func TestContext2Validate_targetedDestroy(t *testing.T) {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -1018,7 +1024,7 @@ func TestContext2Validate_varRefUnknown(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -1038,7 +1044,7 @@ func TestContext2Validate_varRefUnknown(t *testing.T) {
 		return providers.ValidateResourceConfigResponse{}
 	}
 
-	c.Validate(m)
+	c.Validate(m, nil)
 
 	// Input variables are always unknown during the validate walk, because
 	// we're checking for validity of all possible input values. Validity
@@ -1058,7 +1064,7 @@ func TestContext2Validate_interpolateVar(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"template_file": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"template": {Type: cty.String, Optional: true},
 					},
@@ -1074,7 +1080,7 @@ func TestContext2Validate_interpolateVar(t *testing.T) {
 		UIInput: input,
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -1090,7 +1096,7 @@ func TestContext2Validate_interpolateComputedModuleVarDef(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"attr": {Type: cty.String, Optional: true},
 					},
@@ -1106,7 +1112,7 @@ func TestContext2Validate_interpolateComputedModuleVarDef(t *testing.T) {
 		UIInput: input,
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -1126,7 +1132,7 @@ func TestContext2Validate_interpolateMap(t *testing.T) {
 		UIInput: input,
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -1176,7 +1182,7 @@ resource "aws_instance" "foo" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.Err())
 	}
@@ -1207,7 +1213,7 @@ output "out" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatal("succeeded; want errors")
 	}
@@ -1243,7 +1249,7 @@ resource "aws_instance" "foo" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatal("succeeded; want errors")
 	}
@@ -1278,7 +1284,7 @@ output "root" {
 
 	ctx := testContext2(t, &ContextOpts{})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.Err())
 	}
@@ -1301,7 +1307,7 @@ output "out" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatal("succeeded; want errors")
 	}
@@ -1331,7 +1337,7 @@ output "out" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatal("succeeded; want errors")
 	}
@@ -1361,7 +1367,7 @@ output "out" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatal("succeeded; want errors")
 	}
@@ -1390,7 +1396,7 @@ resource "test_instance" "bar" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatal("succeeded; want errors")
 	}
@@ -1422,7 +1428,7 @@ resource "test_instance" "bar" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatal("succeeded; want errors")
 	}
@@ -1446,7 +1452,7 @@ func TestContext2Validate_variableCustomValidationsFail(t *testing.T) {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatal("succeeded; want errors")
 	}
@@ -1480,7 +1486,7 @@ variable "test" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error\ngot: %s", diags.Err().Error())
 	}
@@ -1541,7 +1547,7 @@ resource "aws_instance" "foo" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.ErrWithWarnings())
 	}
@@ -1568,7 +1574,7 @@ resource "aws_instance" "foo" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatal("succeeded; want errors")
 	}
@@ -1598,7 +1604,7 @@ resource "aws_instance" "foo" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatal("succeeded; want errors")
 	}
@@ -1679,7 +1685,7 @@ output "out" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.ErrWithWarnings())
 	}
@@ -1706,7 +1712,7 @@ output "out" {
 `,
 	})
 
-	diags := testContext2(t, &ContextOpts{}).Validate(m)
+	diags := testContext2(t, &ContextOpts{}).Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatal("succeeded; want errors")
 	}
@@ -1744,7 +1750,7 @@ output "out" {
 `,
 	})
 
-	diags := testContext2(t, &ContextOpts{}).Validate(m)
+	diags := testContext2(t, &ContextOpts{}).Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatal("succeeded; want errors")
 	}
@@ -1774,7 +1780,7 @@ resource "test_instance" "a" {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"id": {Type: cty.String, Computed: true},
 					},
@@ -1792,7 +1798,7 @@ resource "test_instance" "a" {
 			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
 		},
 	})
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.Err())
 	}
@@ -1815,7 +1821,7 @@ func TestContext2Validate_sensitiveProvisionerConfig(t *testing.T) {
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
 			"aws_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"foo": {Type: cty.String, Optional: true},
 					},
@@ -1842,7 +1848,7 @@ func TestContext2Validate_sensitiveProvisionerConfig(t *testing.T) {
 		return pr.ValidateProvisionerConfigResponse
 	}
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected error: %s", diags.Err())
 	}
@@ -1852,8 +1858,8 @@ func TestContext2Validate_sensitiveProvisionerConfig(t *testing.T) {
 }
 
 func TestContext2Plan_validateMinMaxDynamicBlock(t *testing.T) {
-	p := new(MockProvider)
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p := new(testing_provider.MockProvider)
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"test_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -1936,7 +1942,7 @@ resource "test_instance" "c" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.ErrWithWarnings())
 	}
@@ -2003,15 +2009,15 @@ resource "test_object" "t" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.ErrWithWarnings())
 	}
 }
 
 func TestContext2Plan_lookupMismatchedObjectTypes(t *testing.T) {
-	p := new(MockProvider)
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p := new(testing_provider.MockProvider)
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"test_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -2060,7 +2066,7 @@ output "out" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.ErrWithWarnings())
 	}
@@ -2093,7 +2099,7 @@ func TestContext2Validate_nonNullableVariableDefaultValidation(t *testing.T) {
 
 	ctx := testContext2(t, &ContextOpts{})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.ErrWithWarnings())
 	}
@@ -2101,7 +2107,7 @@ func TestContext2Validate_nonNullableVariableDefaultValidation(t *testing.T) {
 
 func TestContext2Validate_precondition_good(t *testing.T) {
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"aws_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -2136,7 +2142,7 @@ resource "aws_instance" "test" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.ErrWithWarnings())
 	}
@@ -2144,7 +2150,7 @@ resource "aws_instance" "test" {
 
 func TestContext2Validate_precondition_badCondition(t *testing.T) {
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"aws_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -2179,7 +2185,7 @@ resource "aws_instance" "test" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
 	}
@@ -2190,7 +2196,7 @@ resource "aws_instance" "test" {
 
 func TestContext2Validate_precondition_badErrorMessage(t *testing.T) {
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"aws_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -2225,7 +2231,7 @@ resource "aws_instance" "test" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
 	}
@@ -2236,7 +2242,7 @@ resource "aws_instance" "test" {
 
 func TestContext2Validate_postcondition_good(t *testing.T) {
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"aws_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -2266,7 +2272,7 @@ resource "aws_instance" "test" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.ErrWithWarnings())
 	}
@@ -2274,7 +2280,7 @@ resource "aws_instance" "test" {
 
 func TestContext2Validate_postcondition_badCondition(t *testing.T) {
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"aws_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -2315,7 +2321,7 @@ resource "aws_instance" "test" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
 	}
@@ -2326,7 +2332,7 @@ resource "aws_instance" "test" {
 
 func TestContext2Validate_postcondition_badErrorMessage(t *testing.T) {
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"aws_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -2356,7 +2362,7 @@ resource "aws_instance" "test" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
 	}
@@ -2367,7 +2373,7 @@ resource "aws_instance" "test" {
 
 func TestContext2Validate_precondition_count(t *testing.T) {
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"aws_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -2402,7 +2408,7 @@ resource "aws_instance" "test" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.ErrWithWarnings())
 	}
@@ -2410,7 +2416,7 @@ resource "aws_instance" "test" {
 
 func TestContext2Validate_postcondition_forEach(t *testing.T) {
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"aws_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -2445,7 +2451,7 @@ resource "aws_instance" "test" {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.ErrWithWarnings())
 	}
@@ -2453,7 +2459,7 @@ resource "aws_instance" "test" {
 
 func TestContext2Validate_deprecatedAttr(t *testing.T) {
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		ResourceTypes: map[string]*configschema.Block{
 			"aws_instance": {
 				Attributes: map[string]*configschema.Attribute{
@@ -2479,7 +2485,7 @@ locals {
 		},
 	})
 
-	diags := ctx.Validate(m)
+	diags := ctx.Validate(m, nil)
 	warn := diags.ErrWithWarnings().Error()
 	if !strings.Contains(warn, `The attribute "foo" is deprecated`) {
 		t.Fatalf("expected deprecated warning, got: %q\n", warn)
@@ -2510,8 +2516,1058 @@ resource "aws_instance" "follow" {
 		},
 	})
 
-	diags := c.Validate(m)
+	diags := c.Validate(m, nil)
 	if diags.HasErrors() {
 		t.Fatal(diags.ErrWithWarnings())
+	}
+}
+
+func TestContext2Validate_providerContributedFunctions(t *testing.T) {
+	mockProvider := func() *testing_provider.MockProvider {
+		p := testProvider("test")
+		p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+			Functions: map[string]providers.FunctionDecl{
+				"count_e": {
+					ReturnType: cty.Number,
+					Parameters: []providers.FunctionParam{
+						{
+							Name: "string",
+							Type: cty.String,
+						},
+					},
+				},
+			},
+		}
+		p.CallFunctionFn = func(req providers.CallFunctionRequest) (resp providers.CallFunctionResponse) {
+			if req.FunctionName != "count_e" {
+				resp.Err = fmt.Errorf("incorrect function name %q", req.FunctionName)
+				return resp
+			}
+			if len(req.Arguments) != 1 {
+				resp.Err = fmt.Errorf("wrong number of arguments %d", len(req.Arguments))
+				return resp
+			}
+			if req.Arguments[0].Type() != cty.String {
+				resp.Err = fmt.Errorf("wrong argument type %#v", req.Arguments[0].Type())
+				return resp
+			}
+			if !req.Arguments[0].IsKnown() {
+				resp.Err = fmt.Errorf("argument is unknown")
+				return resp
+			}
+			if req.Arguments[0].IsNull() {
+				resp.Err = fmt.Errorf("argument is null")
+				return resp
+			}
+
+			str := req.Arguments[0].AsString()
+			count := strings.Count(str, "e")
+			resp.Result = cty.NumberIntVal(int64(count))
+			return resp
+		}
+		return p
+	}
+
+	t.Run("valid", func(t *testing.T) {
+		m := testModuleInline(t, map[string]string{
+			"main.tf": `
+terraform {
+	required_providers {
+		test = {
+			source = "hashicorp/test"
+		}
+	}
+}
+locals {
+	result = provider::test::count_e("cheese")
+}
+output "result" {
+	value = local.result
+	precondition {
+		condition     = (local.result == 3)
+		error_message = "Wrong number of Es in my cheese."
+	}
+}
+`,
+		})
+
+		p := mockProvider()
+		ctx := testContext2(t, &ContextOpts{
+			Providers: map[addrs.Provider]providers.Factory{
+				addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+			},
+		})
+
+		diags := ctx.Validate(m, nil)
+		if diags.HasErrors() {
+			t.Fatal(diags.ErrWithWarnings())
+		}
+
+		if !p.CallFunctionCalled {
+			t.Fatal("CallFunction was not called")
+		}
+	})
+	t.Run("wrong name", func(t *testing.T) {
+		m := testModuleInline(t, map[string]string{
+			"main.tf": `
+terraform {
+	required_providers {
+		test = {
+			source = "hashicorp/test"
+		}
+	}
+}
+output "result" {
+	value = provider::test::cout_e("cheese")
+}
+`,
+		})
+
+		p := mockProvider()
+		ctx := testContext2(t, &ContextOpts{
+			Providers: map[addrs.Provider]providers.Factory{
+				addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+			},
+		})
+
+		diags := ctx.Validate(m, nil)
+		if p.CallFunctionCalled {
+			t.Error("CallFunction was called, but should not have been")
+		}
+		if !diags.HasErrors() {
+			t.Fatal("unexpected success")
+		}
+		if got, want := diags.Err().Error(), `Unknown provider function: The function "cout_e" is not available from the provider "test"`; !strings.Contains(got, want) {
+			t.Errorf("wrong error message\nwant substring: %s\ngot: %s", want, got)
+		}
+
+	})
+	t.Run("wrong namespace", func(t *testing.T) {
+		m := testModuleInline(t, map[string]string{
+			"main.tf": `
+terraform {
+	required_providers {
+		test = {
+			source = "hashicorp/test"
+		}
+	}
+}
+output "result" {
+	value = provider::toast::count_e("cheese")
+}
+`,
+		})
+
+		p := mockProvider()
+		ctx := testContext2(t, &ContextOpts{
+			Providers: map[addrs.Provider]providers.Factory{
+				addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+			},
+		})
+
+		diags := ctx.Validate(m, nil)
+		if p.CallFunctionCalled {
+			t.Error("CallFunction was called, but should not have been")
+		}
+		if !diags.HasErrors() {
+			t.Fatal("unexpected success")
+		}
+		if got, want := diags.Err().Error(), `Unknown provider function: There is no function named "provider::toast::count_e`; !strings.Contains(got, want) {
+			t.Errorf("wrong error message\nwant substring: %s\ngot: %s", want, got)
+		}
+	})
+	t.Run("wrong argument type", func(t *testing.T) {
+		m := testModuleInline(t, map[string]string{
+			"main.tf": `
+terraform {
+	required_providers {
+		test = {
+			source = "hashicorp/test"
+		}
+	}
+}
+output "result" {
+	value = provider::test::count_e([])
+}
+`,
+		})
+
+		p := mockProvider()
+		ctx := testContext2(t, &ContextOpts{
+			Providers: map[addrs.Provider]providers.Factory{
+				addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+			},
+		})
+
+		diags := ctx.Validate(m, nil)
+		if p.CallFunctionCalled {
+			t.Error("CallFunction was called, but should not have been")
+		}
+		if !diags.HasErrors() {
+			t.Fatal("unexpected success")
+		}
+		if got, want := diags.Err().Error(), "Invalid function argument: Invalid value for \"string\" parameter: string required, but have tuple."; !strings.Contains(got, want) {
+			t.Errorf("wrong error message\nwant substring: %s\ngot: %s", want, got)
+		}
+	})
+	t.Run("insufficient arguments", func(t *testing.T) {
+		m := testModuleInline(t, map[string]string{
+			"main.tf": `
+terraform {
+	required_providers {
+		test = {
+			source = "hashicorp/test"
+		}
+	}
+}
+output "result" {
+	value = provider::test::count_e()
+}
+`,
+		})
+
+		p := mockProvider()
+		ctx := testContext2(t, &ContextOpts{
+			Providers: map[addrs.Provider]providers.Factory{
+				addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+			},
+		})
+
+		diags := ctx.Validate(m, nil)
+		if p.CallFunctionCalled {
+			t.Error("CallFunction was called, but should not have been")
+		}
+		if !diags.HasErrors() {
+			t.Fatal("unexpected success")
+		}
+		if got, want := diags.Err().Error(), "Not enough function arguments: Function \"provider::test::count_e\" expects 1 argument(s). Missing value for \"string\"."; !strings.Contains(got, want) {
+			t.Errorf("wrong error message\nwant substring: %s\ngot: %s", want, got)
+		}
+	})
+	t.Run("too many arguments", func(t *testing.T) {
+		m := testModuleInline(t, map[string]string{
+			"main.tf": `
+terraform {
+	required_providers {
+		test = {
+			source = "hashicorp/test"
+		}
+	}
+}
+output "result" {
+	value = provider::test::count_e("cheese", "louise")
+}
+`,
+		})
+
+		p := mockProvider()
+		ctx := testContext2(t, &ContextOpts{
+			Providers: map[addrs.Provider]providers.Factory{
+				addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+			},
+		})
+
+		diags := ctx.Validate(m, nil)
+		if p.CallFunctionCalled {
+			t.Error("CallFunction was called, but should not have been")
+		}
+		if !diags.HasErrors() {
+			t.Fatal("unexpected success")
+		}
+		if got, want := diags.Err().Error(), "Too many function arguments: Function \"provider::test::count_e\" expects only 1 argument(s)."; !strings.Contains(got, want) {
+			t.Errorf("wrong error message\nwant substring: %s\ngot: %s", want, got)
+		}
+	})
+	t.Run("unexpected null argument", func(t *testing.T) {
+		m := testModuleInline(t, map[string]string{
+			"main.tf": `
+terraform {
+	required_providers {
+		test = {
+			source = "hashicorp/test"
+		}
+	}
+}
+output "result" {
+	value = provider::test::count_e(null)
+}
+`,
+		})
+
+		p := mockProvider()
+		ctx := testContext2(t, &ContextOpts{
+			Providers: map[addrs.Provider]providers.Factory{
+				addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+			},
+		})
+
+		diags := ctx.Validate(m, nil)
+		if p.CallFunctionCalled {
+			t.Error("CallFunction was called, but should not have been")
+		}
+		if !diags.HasErrors() {
+			t.Fatal("unexpected success")
+		}
+		if got, want := diags.Err().Error(), "Invalid function argument: Invalid value for \"string\" parameter: argument must not be null."; !strings.Contains(got, want) {
+			t.Errorf("wrong error message\nwant substring: %s\ngot: %s", want, got)
+		}
+	})
+	t.Run("unhandled unknown argument", func(t *testing.T) {
+		m := testModuleInline(t, map[string]string{
+			"main.tf": `
+terraform {
+	required_providers {
+		test = {
+			source = "hashicorp/test"
+		}
+	}
+}
+output "result" {
+	value = provider::test::count_e(timestamp())
+}
+`,
+		})
+
+		p := mockProvider()
+		ctx := testContext2(t, &ContextOpts{
+			Providers: map[addrs.Provider]providers.Factory{
+				addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+			},
+		})
+
+		// For this case, validation should succeed without calling the
+		// function yet, because the function doesn't declare that it handles
+		// unknown values and so we must defer validation until a later phase.
+		diags := ctx.Validate(m, nil)
+		if p.CallFunctionCalled {
+			t.Error("CallFunction was called, but should not have been")
+		}
+		if diags.HasErrors() {
+			t.Fatal(diags.ErrWithWarnings())
+		}
+	})
+	t.Run("provider not declared", func(t *testing.T) {
+		m := testModuleInline(t, map[string]string{
+			"main.tf": `
+terraform {
+	required_providers {
+		# Intentionally no declaration of local name "test" here
+	}
+}
+output "result" {
+	value = provider::test::count_e("cheese")
+}
+`,
+		})
+
+		p := mockProvider()
+		ctx := testContext2(t, &ContextOpts{
+			Providers: map[addrs.Provider]providers.Factory{
+				addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+			},
+		})
+
+		diags := ctx.Validate(m, nil)
+		if p.CallFunctionCalled {
+			t.Error("CallFunction was called, but should not have been")
+		}
+		if !diags.HasErrors() {
+			t.Fatal("unexpected success")
+		}
+		// Module author must declare a provider requirement in order to
+		// import a provider's functions.
+		if got, want := diags.Err().Error(), `Unknown provider function: There is no function named "provider::test::count_e"`; !strings.Contains(got, want) {
+			t.Errorf("wrong error message\nwant substring: %s\ngot: %s", want, got)
+		}
+	})
+}
+
+func TestContextValidate_externalProviders(t *testing.T) {
+
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+terraform {
+  required_providers {
+    bar = {
+      source = "hashicorp/bar"
+	}
+  }
+}
+
+provider "bar" {}
+
+resource "bar_instance" "test" {
+  foo = "foo" # should be an int
+}
+`,
+	})
+
+	mustNotConfigure := func(providers.ConfigureProviderRequest) providers.ConfigureProviderResponse {
+		return providers.ConfigureProviderResponse{
+			Diagnostics: tfdiags.Diagnostics{
+				tfdiags.Sourceless(
+					tfdiags.Error,
+					"Pre-configured provider was reconfigured by the modules runtime",
+					"An externally-configured provider should not have its ConfigureProvider function called during planning.",
+				),
+			},
+		}
+	}
+
+	providerAddr := addrs.NewDefaultProvider("bar")
+	providerConfigAddr := addrs.RootProviderConfig{
+		Provider: providerAddr,
+	}
+
+	provider := &testing_provider.MockProvider{
+		GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
+			Provider: providers.Schema{
+				Body: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						// We have a required attribute that is not set, we're
+						// expecting this to not matter as we shouldn't validate
+						// the provider configuration as we're using an external
+						// provider.
+						"required": {
+							Type:     cty.String,
+							Required: true,
+						},
+					},
+				},
+			},
+			ResourceTypes: map[string]providers.Schema{
+				"bar_instance": {
+					Body: &configschema.Block{
+						Attributes: map[string]*configschema.Attribute{
+							// We should still validate this attribute as being
+							// incorrect, even though we have an external
+							// provider.
+							"foo": {
+								Type:     cty.Number,
+								Required: true,
+							},
+						},
+					},
+				},
+			},
+		},
+		ConfigureProviderFn: mustNotConfigure,
+	}
+
+	ctx, diags := NewContext(&ContextOpts{
+		PreloadedProviderSchemas: map[addrs.Provider]providers.ProviderSchema{
+			providerAddr: *provider.GetProviderSchemaResponse,
+		},
+	})
+	tfdiags.AssertNoDiagnostics(t, diags)
+
+	// Many of the MockProvider methods check for this, so we'll set it to be
+	// true externally.
+	provider.ConfigureProviderCalled = true
+
+	diags = ctx.Validate(m, &ValidateOpts{
+		ExternalProviders: map[addrs.RootProviderConfig]providers.Interface{
+			providerConfigAddr: provider,
+		},
+	})
+
+	// We should have exactly one diagnostic, stating there was an error in the
+	// resource. But nothing complaining about the provider itself.
+
+	if len(diags) != 1 {
+		t.Fatalf("expected exactly one diagnostic, got %d", len(diags))
+	}
+
+	if diff := cmp.Diff(diags[0].Description().Summary, "Incorrect attribute value type"); len(diff) > 0 {
+		t.Errorf("unexpected diagnostic summary: %s", diff)
+	}
+	if diff := cmp.Diff(diags[0].Description().Detail, "Inappropriate value for attribute \"foo\": a number is required."); len(diff) > 0 {
+		t.Errorf("unexpected diagnostic detail: %s", diff)
+	}
+}
+
+func TestContext2Validate_providerSchemaError(t *testing.T) {
+	// validate module and output depends_on
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+terraform {
+  required_providers {
+    test = {
+      source = "hashicorp/test"
+    }
+  }
+}
+
+output "foo" {
+	value = provider::test::func("foo")
+}
+`,
+	})
+
+	p := testProvider("test")
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		ResourceTypes: map[string]providers.Schema{
+			"test_instance": {
+				Body: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"id": {Type: cty.String, Computed: true},
+					},
+				},
+			},
+		},
+		Diagnostics: tfdiags.Diagnostics(nil).Append(errors.New("schema problem!")),
+	}
+
+	ctx := testContext2(t, &ContextOpts{
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		},
+	})
+	diags := ctx.Validate(m, nil)
+	if !diags.HasErrors() {
+		t.Fatal("expected error")
+	}
+
+	// while the function in the config doesn't exist, we should not have gotten
+	// that far and stopped at the schema error first
+	for _, d := range diags {
+		if detail := d.Description().Detail; !strings.Contains(detail, "schema problem!") {
+			t.Errorf("unexpected error: %s", detail)
+		}
+	}
+}
+
+func TestContext2Validate_ephemeralOutput_root(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+variable "foo" {
+  ephemeral = true
+  default   = "foo"
+}
+output "test" {
+  ephemeral = true
+  value     = var.foo
+}
+`,
+	})
+
+	ctx := testContext2(t, &ContextOpts{})
+	diags := ctx.Validate(m, &ValidateOpts{})
+	var wantDiags tfdiags.Diagnostics
+	wantDiags = wantDiags.Append(
+		&hcl.Diagnostic{
+			Severity: hcl.DiagError,
+			Summary:  "Ephemeral output not allowed",
+			Detail:   "Ephemeral outputs are not allowed in context of a root module",
+			Subject: &hcl.Range{
+				Filename: filepath.Join(m.Module.SourceDir, "main.tf"),
+				Start:    hcl.Pos{Line: 6, Column: 1, Byte: 59},
+				End:      hcl.Pos{Line: 6, Column: 14, Byte: 72},
+			},
+		},
+	)
+	tfdiags.AssertDiagnosticsMatch(t, diags, wantDiags)
+}
+
+func TestContext2Validate_ephemeralOutput_child(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"child/main.tf": `
+variable "child-eph" {
+  ephemeral = true
+}
+output "out" {
+  ephemeral = true
+  value     = var.child-eph
+}`,
+		"main.tf": `
+variable "eph" {
+  ephemeral = true
+  default   = "foo"
+}
+
+module "child" {
+  source    = "./child"
+  child-eph = var.eph
+}
+`,
+	})
+
+	ctx := testContext2(t, &ContextOpts{})
+	diags := ctx.Validate(m, &ValidateOpts{})
+	tfdiags.AssertNoDiagnostics(t, diags)
+}
+
+func TestContext2Validate_queryList(t *testing.T) {
+	cases := []struct {
+		name           string
+		mainConfig     string
+		extraConfig    map[string]string
+		queryConfig    string
+		diagCount      int
+		expectedErrMsg []string
+	}{
+		{
+			name: "valid simple block",
+			mainConfig: `
+				terraform {	
+					required_providers {
+						test = {
+							source = "hashicorp/test"
+							version = "1.0.0"
+						}
+					}
+				}
+				`,
+			queryConfig: `
+				variable "input" {
+					type = string
+					default = "foo"
+				}
+
+				list "test_resource" "test" {
+					provider = test
+				}
+				`,
+		},
+		{
+			name: "valid list reference",
+			mainConfig: `
+				terraform {	
+					required_providers {
+						test = {
+							source = "hashicorp/test"
+							version = "1.0.0"
+						}
+					}
+				}
+				`,
+			queryConfig: `
+				variable "input" {
+					type = string
+					default = "foo"
+				}
+
+				list "test_resource" "test" {
+					provider = test
+
+					config {
+						filter = {
+							attr = var.input
+						}
+					}
+				}
+
+				list "test_resource" "test2" {
+					provider = test
+					
+					config {
+						filter = {
+							attr = list.test_resource.test.data[0].state.instance_type
+						}
+					}
+				}
+				`,
+		},
+		{
+			name: "valid list instance reference",
+			mainConfig: `
+				terraform {	
+					required_providers {
+						test = {
+							source = "hashicorp/test"
+							version = "1.0.0"
+						}
+					}
+				}
+				`,
+			queryConfig: `
+				variable "input" {
+					type = string
+					default = "foo"
+				}
+
+				list "test_resource" "test" {
+				    count = 1
+					provider = test
+
+					config {
+						filter = {
+							attr = var.input
+						}
+					}
+				}
+
+				list "test_resource" "test2" {
+					provider = test
+					
+					config {
+						filter = {
+							attr = list.test_resource.test[0].data[0].state.instance_type
+						}
+					}
+				}
+				`,
+		},
+		{
+			name: "invalid list result's attribute reference",
+			mainConfig: `
+				terraform {	
+					required_providers {
+						test = {
+							source = "hashicorp/test"
+							version = "1.0.0"
+						}
+					}
+				}
+				`,
+			queryConfig: `
+				variable "input" {
+					type = string
+					default = "foo"
+				}
+
+				list "test_resource" "test" {
+					provider = test
+
+					config {
+						filter = {
+							attr = var.input
+						}
+					}
+				}
+
+				list "test_resource" "test2" {
+					provider = test
+					
+					config {
+						filter = {
+							attr = list.test_resource.test.state.instance_type
+						}
+					}
+				}
+				`,
+			diagCount: 1,
+			expectedErrMsg: []string{
+				"Invalid list resource traversal",
+				"The first step in the traversal for a list resource must be an attribute \"data\"",
+			},
+		},
+		{
+			// We tried to reference a resource of type list without using the fully-qualified name.
+			// The error contains a hint to help the user.
+			name: "reference list block from resource",
+			mainConfig: `
+				terraform {	
+					required_providers {
+						test = {
+							source = "hashicorp/test"
+							version = "1.0.0"
+						}
+					}
+				}
+
+				resource "list" "test_resource1" {
+					provider = test
+				}
+
+				resource "list" "test_resource2" {
+					provider = test
+					attr = list.test_resource1.attr
+				}
+				`,
+			queryConfig: `
+				variable "input" {
+					type = string
+					default = "foo"
+				}
+
+				list "test_resource" "test" {
+					provider = test
+
+					config {
+						filter = {
+							attr = var.input
+						}
+					}
+				}
+				`,
+			diagCount: 1,
+			expectedErrMsg: []string{
+				"Reference to undeclared resource",
+				"A list resource \"test_resource1\" \"attr\" has not been declared in the root module.",
+				"Did you mean the managed resource list.test_resource1? If so, please use the fully qualified name of the resource, e.g. resource.list.test_resource1",
+			},
+		},
+		{
+			// We are referencing a managed resource
+			// of type list using the resource.<block>.<name> syntax. This should be allowed.
+			name: "reference managed resource of type list using resource.<block>.<name>",
+			mainConfig: `
+				terraform {	
+					required_providers {
+						test = {
+							source = "hashicorp/test"
+							version = "1.0.0"
+						}
+					}
+				}
+
+				resource "list" "test_resource" {
+					provider = test
+					attr = "bar"
+				}
+
+				resource "list" "normal_resource" {
+					provider = test
+					attr = resource.list.test_resource.attr
+				}
+				`,
+			queryConfig: `
+				list "test_resource" "test" {
+					provider = test
+
+					config {
+						filter = {
+							attr = resource.list.test_resource.attr
+						}
+					}
+				}
+				`,
+		},
+		{
+			// Test referencing a non-existent list resource
+			name: "reference non-existent list resource",
+			mainConfig: `
+				terraform {	
+					required_providers {
+						test = {
+							source = "hashicorp/test"
+							version = "1.0.0"
+						}
+					}
+				}
+				`,
+			queryConfig: `
+				list "test_resource" "test" {
+					provider = test
+
+					config {
+						filter = {
+							attr = list.non_existent.attr
+						}
+					}
+				}
+				`,
+			diagCount: 1,
+			expectedErrMsg: []string{
+				"A list resource \"non_existent\" \"attr\" has not been declared in the root module.",
+			},
+		},
+		{
+			// Test referencing a list resource with invalid attribute
+			name: "reference list resource with invalid attribute",
+			mainConfig: `
+				terraform {	
+					required_providers {
+						test = {
+							source = "hashicorp/test"
+							version = "1.0.0"
+						}
+					}
+				}
+				`,
+			queryConfig: `
+				list "test_resource" "test" {
+					provider = test
+
+					config {
+						filter = {
+							attr = "valid"
+						}
+					}
+				}
+
+				list "test_resource" "another" {
+					provider = test
+
+					config {
+						filter = {
+							attr = list.test_resource.test.data[0].state.invalid_attr
+						}
+					}
+				}
+				`,
+			diagCount: 1,
+			expectedErrMsg: []string{
+				"Unsupported attribute: This object has no argument, nested block, or exported attribute named \"invalid_attr\".",
+			},
+		},
+		{
+			name: "circular reference between list resources",
+			mainConfig: `
+				terraform {	
+					required_providers {
+						test = {
+							source = "hashicorp/test"
+							version = "1.0.0"
+						}
+					}
+				}
+				`,
+			queryConfig: `
+				list "test_resource" "test1" {
+					provider = test
+
+					config {
+						filter = {
+							attr = list.test_resource.test2.data[0].state.id
+						}
+					}
+				}
+
+				list "test_resource" "test2" {
+					provider = test
+
+					config {
+						filter = {
+							attr = list.test_resource.test1.data[0].state.id
+						}
+					}
+				}
+				`,
+			diagCount: 1,
+			expectedErrMsg: []string{
+				"Cycle: list.test_resource",
+			},
+		},
+		{
+			// Test complex expression with list reference
+			name: "complex expression with list reference",
+			mainConfig: `
+				terraform {	
+					required_providers {
+						test = {
+							source = "hashicorp/test"
+							version = "1.0.0"
+						}
+					}
+				}
+				`,
+			queryConfig: `
+				variable "test_var" {
+					type = string
+					default = "default"
+				}
+
+				list "test_resource" "test1" {
+					provider = test
+
+					config {
+						filter = {
+							attr = var.test_var
+						}
+					}
+				}
+
+				list "test_resource" "test2" {
+					provider = test
+
+					config {
+						filter = {
+							attr = length(list.test_resource.test1.data) > 0 ? list.test_resource.test1.data[0].state.instance_type : var.test_var
+						}
+					}
+				}
+				`,
+		},
+		{
+			// Test list reference with index but without data field
+			name: "list reference with index but without data field",
+			mainConfig: `
+				terraform {	
+					required_providers {
+						test = {
+							source = "hashicorp/test"
+							version = "1.0.0"
+						}
+					}
+				}
+				`,
+			queryConfig: `
+				list "test_resource" "test1" {
+					for_each = toset(["foo", "bar"])
+					provider = test
+
+					config {
+						filter = {
+							attr = each.value
+						}
+					}
+				}
+
+				list "test_resource" "test2" {
+					provider = test
+					for_each = list.test_resource.test1
+
+					config {
+						filter = {
+							attr = each.value.data[0].instance_type
+						}
+					}
+				}
+				`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			configs := map[string]string{"main.tf": tc.mainConfig}
+			if tc.queryConfig != "" {
+				configs["main.tfquery.hcl"] = tc.queryConfig
+			}
+			maps.Copy(configs, tc.extraConfig)
+
+			m := testModuleInline(t, configs)
+
+			providerAddr := addrs.NewDefaultProvider("test")
+			provider := testProvider("test")
+			provider.GetProviderSchemaResponse = getListProviderSchemaResp()
+			var requestConfigs = make(map[string]cty.Value)
+			provider.ListResourceFn = func(request providers.ListResourceRequest) providers.ListResourceResponse {
+				requestConfigs[request.TypeName] = request.Config
+
+				return providers.ListResourceResponse{
+					Result: cty.ObjectVal(map[string]cty.Value{
+						"data":   cty.TupleVal([]cty.Value{}),
+						"config": request.Config,
+					}),
+				}
+			}
+
+			ctx, diags := NewContext(&ContextOpts{
+				Providers: map[addrs.Provider]providers.Factory{
+					providerAddr: testProviderFuncFixed(provider),
+				},
+			})
+			tfdiags.AssertNoDiagnostics(t, diags)
+
+			// Many of the MockProvider methods check for this, so we'll set it to be
+			// true externally.
+			provider.ConfigureProviderCalled = true
+
+			diags = ctx.Validate(m, nil)
+			if len(diags) != tc.diagCount {
+				t.Fatalf("expected %d diagnostics, got %d \n -diags: %s", tc.diagCount, len(diags), diags)
+			}
+
+			if tc.diagCount > 0 {
+				for _, err := range tc.expectedErrMsg {
+					if !strings.Contains(diags.Err().Error(), err) {
+						t.Fatalf("expected error message %q, but got %q", err, diags.Err().Error())
+					}
+				}
+			}
+
+		})
 	}
 }

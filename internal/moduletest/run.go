@@ -5,20 +5,30 @@ package moduletest
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/zclconf/go-cty/cty"
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/configs"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
+	"github.com/hashicorp/terraform/internal/lang/langrefs"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/tfdiags"
 )
 
+const (
+	MainStateIdentifier = ""
+)
+
 type Run struct {
 	Config *configs.TestRun
+
+	// ModuleConfig is the config that this run block is executing against.
+	ModuleConfig *configs.Config
 
 	Verbose *Verbose
 
@@ -26,7 +36,49 @@ type Run struct {
 	Index  int
 	Status Status
 
+	// Outputs are set by the Terraform Test graph once this run block is
+	// executed. Callers should only access this if the Status field is set to
+	// Pass or Fail as both of these cases indicate the run block was executed
+	// successfully, and actually had values to write.
+	Outputs cty.Value
+
 	Diagnostics tfdiags.Diagnostics
+
+	// ExecutionMeta captures metadata about how the test run was executed.
+	//
+	// This field is not always populated. A run that has never been executed
+	// will definitely have a nil value for this field. A run that was
+	// executed may or may not populate this field, depending on exactly what
+	// happened during the run execution. Callers accessing this field MUST
+	// check for nil and handle that case in some reasonable way.
+	//
+	// Executing the same run multiple times may or may not update this field
+	// on each execution.
+	ExecutionMeta *RunExecutionMeta
+}
+
+func NewRun(config *configs.TestRun, moduleConfig *configs.Config, index int) *Run {
+	return &Run{
+		Config:       config,
+		ModuleConfig: moduleConfig,
+		Name:         config.Name,
+		Index:        index,
+	}
+}
+
+type RunExecutionMeta struct {
+	Start    time.Time
+	Duration time.Duration
+}
+
+// StartTimestamp returns the start time metadata as a timestamp formatted as YYYY-MM-DDTHH:MM:SSZ.
+// Times are converted to UTC, if they aren't already.
+// If the start time is unset an empty string is returned.
+func (m *RunExecutionMeta) StartTimestamp() string {
+	if m.Start.IsZero() {
+		return ""
+	}
+	return m.Start.UTC().Format(time.RFC3339)
 }
 
 // Verbose is a utility struct that holds all the information required for a run
@@ -94,14 +146,14 @@ func (run *Run) GetReferences() ([]*addrs.Reference, tfdiags.Diagnostics) {
 
 	for _, rule := range run.Config.CheckRules {
 		for _, variable := range rule.Condition.Variables() {
-			reference, diags := addrs.ParseRef(variable)
+			reference, diags := addrs.ParseRefFromTestingScope(variable)
 			diagnostics = diagnostics.Append(diags)
 			if reference != nil {
 				references = append(references, reference)
 			}
 		}
 		for _, variable := range rule.ErrorMessage.Variables() {
-			reference, diags := addrs.ParseRef(variable)
+			reference, diags := addrs.ParseRefFromTestingScope(variable)
 			diagnostics = diagnostics.Append(diags)
 			if reference != nil {
 				references = append(references, reference)
@@ -109,7 +161,59 @@ func (run *Run) GetReferences() ([]*addrs.Reference, tfdiags.Diagnostics) {
 		}
 	}
 
+	for _, expr := range run.Config.Variables {
+		moreRefs, moreDiags := langrefs.ReferencesInExpr(addrs.ParseRefFromTestingScope, expr)
+		diagnostics = diagnostics.Append(moreDiags)
+		references = append(references, moreRefs...)
+	}
+
+	for name, variable := range run.ModuleConfig.Module.Variables {
+
+		// because we also draw implicit references back to any variables
+		// defined in the test file with the same name as actual variables, then
+		// we'll count these as references as well.
+
+		if _, ok := run.Config.Variables[name]; ok {
+
+			// BUT, if the variable is defined within the list of variables
+			// within the run block then we don't want to draw an implicit
+			// reference as the data comes from that expression.
+
+			continue
+		}
+
+		references = append(references, &addrs.Reference{
+			Subject:     addrs.InputVariable{Name: name},
+			SourceRange: tfdiags.SourceRangeFromHCL(variable.DeclRange),
+		})
+	}
+
 	return references, diagnostics
+}
+
+// GetStateKey returns the run's state key. If an explicit state key is set in
+// the run's configuration, that key is returned. Otherwise, if the run is using
+// an alternate module under test, the source of that module is returned as the
+// state key. If neither of these conditions are met, an empty string is
+// returned, and this denotes that the run is using the root module under test.
+func (run *Run) GetStateKey() string {
+	if run.Config.StateKey != "" {
+		return run.Config.StateKey
+	}
+
+	// The run has an alternate module under test, so we can use the module's source
+	if run.Config.ConfigUnderTest != nil {
+		return run.Config.Module.Source.String()
+	}
+
+	return MainStateIdentifier
+}
+
+// GetModuleConfigID returns the identifier for the module configuration that
+// this run is testing. This is used to uniquely identify the module
+// configuration in the test state.
+func (run *Run) GetModuleConfigID() string {
+	return run.ModuleConfig.Module.SourceDir
 }
 
 // ExplainExpectedFailures is similar to ValidateExpectedFailures except it
@@ -452,9 +556,32 @@ func (run *Run) ValidateExpectedFailures(originals tfdiags.Diagnostics) tfdiags.
 				Summary:  "Missing expected failure",
 				Detail:   fmt.Sprintf("The checkable object, %s, was expected to report an error but did not.", addr.String()),
 				Subject:  sourceRanges.Get(addr).ToHCL().Ptr(),
+				Extra:    missingExpectedFailure(true),
 			})
 		}
 	}
 
 	return diags
+}
+
+// DiagnosticExtraFromMissingExpectedFailure provides an interface for diagnostic ExtraInfo to
+// denote that a diagnostic was generated as a result of a missing expected failure.
+type DiagnosticExtraFromMissingExpectedFailure interface {
+	DiagnosticFromMissingExpectedFailure() bool
+}
+
+// DiagnosticFromMissingExpectedFailure checks if the provided diagnostic
+// is a result of a missing expected failure.
+func DiagnosticFromMissingExpectedFailure(diag tfdiags.Diagnostic) bool {
+	maybe := tfdiags.ExtraInfo[DiagnosticExtraFromMissingExpectedFailure](diag)
+	if maybe == nil {
+		return false
+	}
+	return maybe.DiagnosticFromMissingExpectedFailure()
+}
+
+type missingExpectedFailure bool
+
+func (missingExpectedFailure) DiagnosticFromMissingExpectedFailure() bool {
+	return true
 }

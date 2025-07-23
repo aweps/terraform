@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform/internal/addrs"
-	"github.com/hashicorp/terraform/internal/backend"
+	"github.com/hashicorp/terraform/internal/backend/backendrun"
 	"github.com/hashicorp/terraform/internal/command/arguments"
 	"github.com/hashicorp/terraform/internal/command/clistate"
 	"github.com/hashicorp/terraform/internal/command/views"
@@ -65,7 +65,7 @@ func TestLocal_refreshInput(t *testing.T) {
 
 	schema := providers.ProviderSchema{
 		Provider: providers.Schema{
-			Block: &configschema.Block{
+			Body: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
 					"value": {Type: cty.String, Optional: true},
 				},
@@ -73,7 +73,7 @@ func TestLocal_refreshInput(t *testing.T) {
 		},
 		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"id":  {Type: cty.String, Computed: true},
 						"foo": {Type: cty.String, Optional: true},
@@ -160,7 +160,7 @@ func TestLocal_refreshValidateProviderConfigured(t *testing.T) {
 
 	schema := providers.ProviderSchema{
 		Provider: providers.Schema{
-			Block: &configschema.Block{
+			Body: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
 					"value": {Type: cty.String, Optional: true},
 				},
@@ -168,7 +168,7 @@ func TestLocal_refreshValidateProviderConfigured(t *testing.T) {
 		},
 		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"id":  {Type: cty.String, Computed: true},
 						"ami": {Type: cty.String, Optional: true},
@@ -225,7 +225,7 @@ func TestLocal_refresh_context_error(t *testing.T) {
 		t.Fatalf("bad: %s", err)
 	}
 	<-run.Done()
-	if run.Result == backend.OperationSuccess {
+	if run.Result == backendrun.OperationSuccess {
 		t.Fatal("operation succeeded; want failure")
 	}
 	assertBackendStateUnlocked(t, b)
@@ -264,7 +264,7 @@ func TestLocal_refreshEmptyState(t *testing.T) {
 	assertBackendStateUnlocked(t, b)
 }
 
-func testOperationRefresh(t *testing.T, configDir string) (*backend.Operation, func(), func(*testing.T) *terminal.TestOutput) {
+func testOperationRefresh(t *testing.T, configDir string) (*backendrun.Operation, func(), func(*testing.T) *terminal.TestOutput) {
 	t.Helper()
 
 	_, configLoader, configCleanup := initwd.MustLoadConfigForTests(t, configDir, "tests")
@@ -277,8 +277,8 @@ func testOperationRefresh(t *testing.T, configDir string) (*backend.Operation, f
 	depLocks := depsfile.NewLocks()
 	depLocks.SetProviderOverridden(addrs.MustParseProviderSourceString("registry.terraform.io/hashicorp/test"))
 
-	return &backend.Operation{
-		Type:            backend.OperationTypeRefresh,
+	return &backendrun.Operation{
+		Type:            backendrun.OperationTypeRefresh,
 		ConfigDir:       configDir,
 		ConfigLoader:    configLoader,
 		StateLocker:     clistate.NewNoopLocker(),
@@ -309,7 +309,7 @@ func refreshFixtureSchema() providers.ProviderSchema {
 	return providers.ProviderSchema{
 		ResourceTypes: map[string]providers.Schema{
 			"test_instance": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"ami": {Type: cty.String, Optional: true},
 						"id":  {Type: cty.String, Computed: true},

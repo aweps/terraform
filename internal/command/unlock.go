@@ -10,9 +10,9 @@ import (
 
 	"github.com/hashicorp/terraform/internal/states/statemgr"
 
+	"github.com/hashicorp/cli"
 	"github.com/hashicorp/terraform/internal/terraform"
 	"github.com/hashicorp/terraform/internal/tfdiags"
-	"github.com/mitchellh/cli"
 )
 
 // UnlockCommand is a cli.Command implementation that manually unlocks
@@ -60,7 +60,7 @@ func (c *UnlockCommand) Run(args []string) int {
 
 	// Load the backend
 	b, backendDiags := c.Backend(&BackendOpts{
-		Config: backendConfig,
+		BackendConfig: backendConfig,
 	})
 	diags = diags.Append(backendDiags)
 	if backendDiags.HasErrors() {

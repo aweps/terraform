@@ -4,7 +4,7 @@ This directory contains some documentation about the Terraform Core codebase,
 aimed at readers who are interested in making code contributions.
 
 If you're looking for information on _using_ Terraform, please instead refer
-to [the main Terraform CLI documentation](https://www.terraform.io/docs/cli/index.html).
+to [the main Terraform CLI documentation](https://developer.hashicorp.com/terraform/cli).
 
 ## Terraform Core Architecture Documents
 
@@ -26,7 +26,7 @@ to [the main Terraform CLI documentation](https://www.terraform.io/docs/cli/inde
   SDK and so wish to conform to them.
 
   (If you are planning to write a new provider using the _official_ SDK then
-  please refer to [the Extend documentation](https://www.terraform.io/docs/extend/index.html)
+  please refer to [the Plugin development documentation](https://developer.hashicorp.com/terraform/plugin)
   instead; it presents similar information from the perspective of the SDK
   API, rather than the plugin wire protocol.)
 
@@ -38,6 +38,11 @@ to [the main Terraform CLI documentation](https://www.terraform.io/docs/cli/inde
 
 * [Terraform Core RPC API](../internal/rpcapi/README.md): an integration point
   for external software that needs to integrate Terraform Core functionality.
+
+* [Upgrading Terraform's Dependencies](./dependency-upgrades.md): guidance on
+  some special details that arise when we upgrade Go Module dependencies, due
+  to this codebase containing Terraform CLI, Terraform Core, and the various
+  remote state backends which all have some overlapping dependencies.
 
 * [How Terraform Uses Unicode](./unicode.md): an overview of the various
   features of Terraform that rely on Unicode and how to change those features

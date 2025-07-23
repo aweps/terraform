@@ -15,14 +15,14 @@ import (
 
 	"github.com/hashicorp/terraform/internal/configs/configschema"
 	"github.com/hashicorp/terraform/internal/providers"
-	"github.com/hashicorp/terraform/internal/terraform"
+	"github.com/hashicorp/terraform/internal/providers/testing"
 	"github.com/hashicorp/terraform/internal/tfdiags"
 )
 
 var (
 	ProviderSchema = &providers.GetProviderSchemaResponse{
 		Provider: providers.Schema{
-			Block: &configschema.Block{
+			Body: &configschema.Block{
 				Attributes: map[string]*configschema.Attribute{
 					"data_prefix":     {Type: cty.String, Optional: true},
 					"resource_prefix": {Type: cty.String, Optional: true},
@@ -31,7 +31,7 @@ var (
 		},
 		ResourceTypes: map[string]providers.Schema{
 			"test_resource": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
 						"id":                   {Type: cty.String, Optional: true, Computed: true},
 						"value":                {Type: cty.String, Optional: true},
@@ -39,16 +39,18 @@ var (
 						"destroy_fail":         {Type: cty.Bool, Optional: true, Computed: true},
 						"create_wait_seconds":  {Type: cty.Number, Optional: true},
 						"destroy_wait_seconds": {Type: cty.Number, Optional: true},
+						"write_only":           {Type: cty.String, Optional: true, WriteOnly: true},
 					},
 				},
 			},
 		},
 		DataSources: map[string]providers.Schema{
 			"test_data_source": {
-				Block: &configschema.Block{
+				Body: &configschema.Block{
 					Attributes: map[string]*configschema.Attribute{
-						"id":    {Type: cty.String, Required: true},
-						"value": {Type: cty.String, Computed: true},
+						"id":         {Type: cty.String, Required: true},
+						"value":      {Type: cty.String, Computed: true},
+						"write_only": {Type: cty.String, Optional: true, WriteOnly: true},
 
 						// We never actually reference these values from a data
 						// source, but we have tests that use the same cty.Value
@@ -63,13 +65,38 @@ var (
 				},
 			},
 		},
+		EphemeralResourceTypes: map[string]providers.Schema{
+			"test_ephemeral_resource": {
+				Body: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"value": {
+							Type:     cty.String,
+							Computed: true,
+						},
+					},
+				},
+			},
+		},
+		Functions: map[string]providers.FunctionDecl{
+			"is_true": {
+				Parameters: []providers.FunctionParam{
+					{
+						Name:               "input",
+						Type:               cty.Bool,
+						AllowNullValue:     false,
+						AllowUnknownValues: false,
+					},
+				},
+				ReturnType: cty.Bool,
+			},
+		},
 	}
 )
 
 // TestProvider is a wrapper around terraform.MockProvider that defines dynamic
 // schemas, and keeps track of the resources and data sources that it contains.
 type TestProvider struct {
-	Provider *terraform.MockProvider
+	Provider *testing.MockProvider
 
 	data, resource cty.Value
 
@@ -78,6 +105,13 @@ type TestProvider struct {
 	Store *ResourceStore
 }
 
+// NewProvider creates a new TestProvider for use in tests.
+//
+// If you provide an empty or nil *ResourceStore argument this is equivalent to the provider
+// not having provisioned any remote objects prior to the test's events.
+//
+// If you provide a *ResourceStore containing values, those cty.Values represent remote objects
+// that the provider has 'already' provisioned and can return information about immediately in a test.
 func NewProvider(store *ResourceStore) *TestProvider {
 	if store == nil {
 		store = &ResourceStore{
@@ -86,7 +120,7 @@ func NewProvider(store *ResourceStore) *TestProvider {
 	}
 
 	provider := &TestProvider{
-		Provider: new(terraform.MockProvider),
+		Provider: new(testing.MockProvider),
 		Store:    store,
 	}
 
@@ -96,6 +130,9 @@ func NewProvider(store *ResourceStore) *TestProvider {
 	provider.Provider.ApplyResourceChangeFn = provider.ApplyResourceChange
 	provider.Provider.ReadResourceFn = provider.ReadResource
 	provider.Provider.ReadDataSourceFn = provider.ReadDataSource
+	provider.Provider.CallFunctionFn = provider.CallFunction
+	provider.Provider.OpenEphemeralResourceFn = provider.OpenEphemeralResource
+	provider.Provider.CloseEphemeralResourceFn = provider.CloseEphemeralResource
 
 	return provider
 }
@@ -155,8 +192,7 @@ func (provider *TestProvider) DataSourceCount() int {
 }
 
 func (provider *TestProvider) count(prefix string) int {
-	provider.Store.mutex.RLock()
-	defer provider.Store.mutex.RUnlock()
+	defer provider.Store.beginRead()()
 
 	if len(prefix) == 0 {
 		return len(provider.Store.Data)
@@ -172,8 +208,7 @@ func (provider *TestProvider) count(prefix string) int {
 }
 
 func (provider *TestProvider) string(prefix string) string {
-	provider.Store.mutex.RLock()
-	defer provider.Store.mutex.RUnlock()
+	defer provider.Store.beginRead()()
 
 	var keys []string
 	for key := range provider.Store.Data {
@@ -205,9 +240,15 @@ func (provider *TestProvider) PlanResourceChange(request providers.PlanResourceC
 		resource = cty.ObjectVal(vals)
 	}
 
-	if destryFail := resource.GetAttr("destroy_fail"); !destryFail.IsKnown() || destryFail.IsNull() {
+	if destroyFail := resource.GetAttr("destroy_fail"); !destroyFail.IsKnown() || destroyFail.IsNull() {
 		vals := resource.AsValueMap()
 		vals["destroy_fail"] = cty.UnknownVal(cty.Bool)
+		resource = cty.ObjectVal(vals)
+	}
+
+	if writeOnly := resource.GetAttr("write_only"); !writeOnly.IsNull() {
+		vals := resource.AsValueMap()
+		vals["write_only"] = cty.NullVal(cty.String)
 		resource = cty.ObjectVal(vals)
 	}
 
@@ -307,14 +348,48 @@ func (provider *TestProvider) ReadDataSource(request providers.ReadDataSourceReq
 		diags = diags.Append(tfdiags.Sourceless(tfdiags.Error, "not found", fmt.Sprintf("%s does not exist", id)))
 	}
 
+	if writeOnly := resource.GetAttr("write_only"); !writeOnly.IsNull() {
+		vals := resource.AsValueMap()
+		vals["write_only"] = cty.NullVal(cty.String)
+		resource = cty.ObjectVal(vals)
+	}
+
 	return providers.ReadDataSourceResponse{
 		State:       resource,
 		Diagnostics: diags,
 	}
 }
 
+func (provider *TestProvider) CallFunction(request providers.CallFunctionRequest) providers.CallFunctionResponse {
+	switch request.FunctionName {
+	case "is_true":
+		return providers.CallFunctionResponse{
+			Result: request.Arguments[0],
+		}
+	default:
+		return providers.CallFunctionResponse{
+			Err: fmt.Errorf("unknown function %q", request.FunctionName),
+		}
+	}
+}
+
+func (provider *TestProvider) OpenEphemeralResource(providers.OpenEphemeralResourceRequest) (resp providers.OpenEphemeralResourceResponse) {
+	resp.Result = cty.ObjectVal(map[string]cty.Value{
+		"value": cty.StringVal("bar"),
+	})
+	return resp
+}
+
+func (provider *TestProvider) CloseEphemeralResource(providers.CloseEphemeralResourceRequest) (resp providers.CloseEphemeralResourceResponse) {
+	return resp
+}
+
 // ResourceStore manages a set of cty.Value resources that can be shared between
 // TestProvider providers.
+//
+// A ResourceStore represents the remote objects that a test provider is managing.
+// For example, when the test provider gets a ReadResource request it will search
+// the store for a resource with a matching ID. See (*TestProvider).ReadResource.
 type ResourceStore struct {
 	mutex sync.RWMutex
 
@@ -322,8 +397,7 @@ type ResourceStore struct {
 }
 
 func (store *ResourceStore) Delete(key string) cty.Value {
-	store.mutex.Lock()
-	defer store.mutex.Unlock()
+	defer store.beginWrite()()
 
 	if resource, ok := store.Data[key]; ok {
 		delete(store.Data, key)
@@ -333,15 +407,13 @@ func (store *ResourceStore) Delete(key string) cty.Value {
 }
 
 func (store *ResourceStore) Get(key string) cty.Value {
-	store.mutex.RLock()
-	defer store.mutex.RUnlock()
+	defer store.beginRead()()
 
 	return store.get(key)
 }
 
 func (store *ResourceStore) Put(key string, resource cty.Value) cty.Value {
-	store.mutex.Lock()
-	defer store.mutex.Unlock()
+	defer store.beginWrite()()
 
 	old := store.get(key)
 	store.Data[key] = resource
@@ -353,4 +425,14 @@ func (store *ResourceStore) get(key string) cty.Value {
 		return resource
 	}
 	return cty.NilVal
+}
+
+func (store *ResourceStore) beginWrite() func() {
+	store.mutex.Lock()
+	return store.mutex.Unlock
+
+}
+func (store *ResourceStore) beginRead() func() {
+	store.mutex.RLock()
+	return store.mutex.RUnlock
 }

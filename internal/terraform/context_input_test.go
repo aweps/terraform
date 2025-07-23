@@ -16,12 +16,13 @@ import (
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/states"
+	"github.com/hashicorp/terraform/internal/tfdiags"
 )
 
 func TestContext2Input_provider(t *testing.T) {
 	m := testModule(t, "input-provider")
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		Provider: &configschema.Block{
 			Attributes: map[string]*configschema.Attribute{
 				"foo": {
@@ -74,7 +75,7 @@ func TestContext2Input_provider(t *testing.T) {
 	}
 
 	plan, diags := ctx.Plan(m, states.NewState(), DefaultPlanOpts)
-	assertNoErrors(t, diags)
+	tfdiags.AssertNoErrors(t, diags)
 
 	if _, diags := ctx.Apply(plan, m, nil); diags.HasErrors() {
 		t.Fatalf("apply errors: %s", diags.Err())
@@ -88,7 +89,7 @@ func TestContext2Input_provider(t *testing.T) {
 func TestContext2Input_providerMulti(t *testing.T) {
 	m := testModule(t, "input-provider-multi")
 
-	getProviderSchemaResponse := getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	getProviderSchemaResponse := getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		Provider: &configschema.Block{
 			Attributes: map[string]*configschema.Attribute{
 				"foo": {
@@ -145,7 +146,7 @@ func TestContext2Input_providerMulti(t *testing.T) {
 	}
 
 	plan, diags := ctx.Plan(m, states.NewState(), DefaultPlanOpts)
-	assertNoErrors(t, diags)
+	tfdiags.AssertNoErrors(t, diags)
 
 	providerFactory = func() (providers.Interface, error) {
 		p := testProvider("aws")
@@ -189,7 +190,7 @@ func TestContext2Input_providerId(t *testing.T) {
 	m := testModule(t, "input-provider")
 
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		Provider: &configschema.Block{
 			Attributes: map[string]*configschema.Attribute{
 				"foo": {
@@ -233,7 +234,7 @@ func TestContext2Input_providerId(t *testing.T) {
 	}
 
 	plan, diags := ctx.Plan(m, states.NewState(), DefaultPlanOpts)
-	assertNoErrors(t, diags)
+	tfdiags.AssertNoErrors(t, diags)
 
 	if _, diags := ctx.Apply(plan, m, nil); diags.HasErrors() {
 		t.Fatalf("apply errors: %s", diags.Err())
@@ -249,7 +250,7 @@ func TestContext2Input_providerOnly(t *testing.T) {
 
 	m := testModule(t, "input-provider-vars")
 	p := testProvider("aws")
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		Provider: &configschema.Block{
 			Attributes: map[string]*configschema.Attribute{
 				"foo": {
@@ -307,7 +308,7 @@ func TestContext2Input_providerOnly(t *testing.T) {
 			},
 		},
 	})
-	assertNoErrors(t, diags)
+	tfdiags.AssertNoErrors(t, diags)
 
 	state, err := ctx.Apply(plan, m, nil)
 	if err != nil {
@@ -358,7 +359,7 @@ func TestContext2Input_providerVars(t *testing.T) {
 			},
 		},
 	})
-	assertNoErrors(t, diags)
+	tfdiags.AssertNoErrors(t, diags)
 
 	if _, diags := ctx.Apply(plan, m, nil); diags.HasErrors() {
 		t.Fatalf("apply errors: %s", diags.Err())
@@ -409,7 +410,7 @@ func TestContext2Input_dataSourceRequiresRefresh(t *testing.T) {
 	p := testProvider("null")
 	m := testModule(t, "input-module-data-vars")
 
-	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&providerSchema{
 		DataSources: map[string]*configschema.Block{
 			"null_data_source": {
 				Attributes: map[string]*configschema.Attribute{

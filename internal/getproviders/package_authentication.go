@@ -39,6 +39,13 @@ type PackageAuthenticationResult struct {
 	KeyID  string
 }
 
+func NewPackageAuthenticationResult(result int, keyID string) *PackageAuthenticationResult {
+	return &PackageAuthenticationResult{
+		result: packageAuthenticationResult(result),
+		KeyID:  keyID,
+	}
+}
+
 func (t *PackageAuthenticationResult) String() string {
 	if t == nil {
 		return "unauthenticated"
@@ -531,7 +538,7 @@ func (s signatureAuthentication) findSigningKey() (*SigningKey, string, error) {
 
 		entity, err := s.checkDetachedSignature(keyring, bytes.NewReader(s.Document), bytes.NewReader(s.Signature), nil)
 
-		// If the signature issuer does not match the the key, keep trying the
+		// If the signature issuer does not match the key, keep trying the
 		// rest of the provided keys.
 		if err == openpgpErrors.ErrUnknownIssuer {
 			continue

@@ -4,17 +4,39 @@
 package views
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/zclconf/go-cty/cty"
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/plans"
 	"github.com/hashicorp/terraform/internal/terminal"
 	"github.com/hashicorp/terraform/internal/terraform"
-	"github.com/zclconf/go-cty/cty"
 )
+
+func testJSONHookResourceID(addr addrs.AbsResourceInstance) terraform.HookResourceIdentity {
+	return terraform.HookResourceIdentity{
+		Addr: addr,
+		ProviderAddr: addrs.Provider{
+			Type:      "test",
+			Namespace: "hashicorp",
+			Hostname:  "example.com",
+		},
+	}
+}
+
+func testJSONHookActionID(addr addrs.AbsActionInvocationInstance) terraform.HookActionIdentity {
+	return addrs.AbsActionInvocationInstance{
+		TriggeringResource: addr.TriggeringResource,
+		Action:             addr.Action,
+		TriggerIndex:       addr.TriggerIndex,
+	}
+}
 
 // Test a sequence of hooks associated with creating a resource
 func TestJSONHook_create(t *testing.T) {
@@ -48,15 +70,15 @@ func TestJSONHook_create(t *testing.T) {
 		}),
 	})
 
-	action, err := hook.PreApply(addr, addrs.NotDeposed, plans.Create, priorState, plannedNewState)
+	action, err := hook.PreApply(testJSONHookResourceID(addr), addrs.NotDeposed, plans.Create, priorState, plannedNewState)
 	testHookReturnValues(t, action, err)
 
-	action, err = hook.PreProvisionInstanceStep(addr, "local-exec")
+	action, err = hook.PreProvisionInstanceStep(testJSONHookResourceID(addr), "local-exec")
 	testHookReturnValues(t, action, err)
 
-	hook.ProvisionOutput(addr, "local-exec", `Executing: ["/bin/sh" "-c" "touch /etc/motd"]`)
+	hook.ProvisionOutput(testJSONHookResourceID(addr), "local-exec", `Executing: ["/bin/sh" "-c" "touch /etc/motd"]`)
 
-	action, err = hook.PostProvisionInstanceStep(addr, "local-exec", nil)
+	action, err = hook.PostProvisionInstanceStep(testJSONHookResourceID(addr), "local-exec", nil)
 	testHookReturnValues(t, action, err)
 
 	// Travel 10s into the future, notify the progress goroutine, and sleep
@@ -65,7 +87,7 @@ func TestJSONHook_create(t *testing.T) {
 	now = now.Add(10 * time.Second)
 	after <- now
 	nowMu.Unlock()
-	time.Sleep(1 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 
 	// Travel 10s into the future, notify the progress goroutine, and sleep
 	// briefly to allow it to execute
@@ -73,24 +95,24 @@ func TestJSONHook_create(t *testing.T) {
 	now = now.Add(10 * time.Second)
 	after <- now
 	nowMu.Unlock()
-	time.Sleep(1 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 
 	// Travel 2s into the future. We have arrived!
 	nowMu.Lock()
 	now = now.Add(2 * time.Second)
 	nowMu.Unlock()
 
-	action, err = hook.PostApply(addr, addrs.NotDeposed, plannedNewState, nil)
+	action, err = hook.PostApply(testJSONHookResourceID(addr), addrs.NotDeposed, plannedNewState, nil)
 	testHookReturnValues(t, action, err)
 
 	// Shut down the progress goroutine if still active
-	hook.applyingLock.Lock()
-	for key, progress := range hook.applying {
+	hook.resourceProgressMu.Lock()
+	for key, progress := range hook.resourceProgress {
 		close(progress.done)
 		<-progress.heartbeatDone
-		delete(hook.applying, key)
+		delete(hook.resourceProgress, key)
 	}
-	hook.applyingLock.Unlock()
+	hook.resourceProgressMu.Unlock()
 
 	wantResource := map[string]interface{}{
 		"addr":             string("test_instance.boop"),
@@ -203,25 +225,25 @@ func TestJSONHook_errors(t *testing.T) {
 		}),
 	})
 
-	action, err := hook.PreApply(addr, addrs.NotDeposed, plans.Delete, priorState, plannedNewState)
+	action, err := hook.PreApply(testJSONHookResourceID(addr), addrs.NotDeposed, plans.Delete, priorState, plannedNewState)
 	testHookReturnValues(t, action, err)
 
 	provisionError := fmt.Errorf("provisioner didn't want to")
-	action, err = hook.PostProvisionInstanceStep(addr, "local-exec", provisionError)
+	action, err = hook.PostProvisionInstanceStep(testJSONHookResourceID(addr), "local-exec", provisionError)
 	testHookReturnValues(t, action, err)
 
 	applyError := fmt.Errorf("provider was sad")
-	action, err = hook.PostApply(addr, addrs.NotDeposed, plannedNewState, applyError)
+	action, err = hook.PostApply(testJSONHookResourceID(addr), addrs.NotDeposed, plannedNewState, applyError)
 	testHookReturnValues(t, action, err)
 
 	// Shut down the progress goroutine
-	hook.applyingLock.Lock()
-	for key, progress := range hook.applying {
+	hook.resourceProgressMu.Lock()
+	for key, progress := range hook.resourceProgress {
 		close(progress.done)
 		<-progress.heartbeatDone
-		delete(hook.applying, key)
+		delete(hook.resourceProgress, key)
 	}
-	hook.applyingLock.Unlock()
+	hook.resourceProgressMu.Unlock()
 
 	wantResource := map[string]interface{}{
 		"addr":             string("test_instance.boop"),
@@ -285,10 +307,10 @@ func TestJSONHook_refresh(t *testing.T) {
 		}),
 	})
 
-	action, err := hook.PreRefresh(addr, addrs.NotDeposed, state)
+	action, err := hook.PreRefresh(testJSONHookResourceID(addr), addrs.NotDeposed, state)
 	testHookReturnValues(t, action, err)
 
-	action, err = hook.PostRefresh(addr, addrs.NotDeposed, state, state)
+	action, err = hook.PostRefresh(testJSONHookResourceID(addr), addrs.NotDeposed, state, state)
 	testHookReturnValues(t, action, err)
 
 	wantResource := map[string]interface{}{
@@ -321,6 +343,464 @@ func TestJSONHook_refresh(t *testing.T) {
 				"resource": wantResource,
 				"id_key":   "id",
 				"id_value": "honk",
+			},
+		},
+	}
+
+	testJSONViewOutputEquals(t, done(t).Stdout(), want)
+}
+
+func TestJSONHook_EphemeralOp(t *testing.T) {
+	streams, done := terminal.StreamsForTesting(t)
+	hook := newJSONHook(NewJSONView(NewView(streams)))
+
+	addr := addrs.Resource{
+		Mode: addrs.ManagedResourceMode,
+		Type: "test_instance",
+		Name: "boop",
+	}.Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance)
+
+	action, err := hook.PreEphemeralOp(testJSONHookResourceID(addr), plans.Open)
+	testHookReturnValues(t, action, err)
+
+	action, err = hook.PostEphemeralOp(testJSONHookResourceID(addr), plans.Open, nil)
+	testHookReturnValues(t, action, err)
+
+	want := []map[string]interface{}{
+		{
+			"@level":   "info",
+			"@message": "test_instance.boop: Opening...",
+			"@module":  "terraform.ui",
+			"type":     "ephemeral_op_start",
+			"hook": map[string]interface{}{
+				"action": string("open"),
+				"resource": map[string]interface{}{
+					"addr":             string("test_instance.boop"),
+					"implied_provider": string("test"),
+					"module":           string(""),
+					"resource":         string("test_instance.boop"),
+					"resource_key":     nil,
+					"resource_name":    string("boop"),
+					"resource_type":    string("test_instance"),
+				},
+			},
+		},
+		{
+			"@level":   "info",
+			"@message": "test_instance.boop: Opening complete after 0s",
+			"@module":  "terraform.ui",
+			"type":     "ephemeral_op_complete",
+			"hook": map[string]interface{}{
+				"action":          string("open"),
+				"elapsed_seconds": float64(0),
+				"resource": map[string]interface{}{
+					"addr":             string("test_instance.boop"),
+					"implied_provider": string("test"),
+					"module":           string(""),
+					"resource":         string("test_instance.boop"),
+					"resource_key":     nil,
+					"resource_name":    string("boop"),
+					"resource_type":    string("test_instance"),
+				},
+			},
+		},
+	}
+
+	testJSONViewOutputEquals(t, done(t).Stdout(), want)
+}
+
+func TestJSONHook_EphemeralOp_progress(t *testing.T) {
+	streams, done := terminal.StreamsForTesting(t)
+	hook := newJSONHook(NewJSONView(NewView(streams)))
+	hook.periodicUiTimer = 1 * time.Second
+
+	addr := addrs.Resource{
+		Mode: addrs.ManagedResourceMode,
+		Type: "test_instance",
+		Name: "boop",
+	}.Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance)
+
+	action, err := hook.PreEphemeralOp(testJSONHookResourceID(addr), plans.Open)
+	testHookReturnValues(t, action, err)
+
+	time.Sleep(2005 * time.Millisecond)
+
+	action, err = hook.PostEphemeralOp(testJSONHookResourceID(addr), plans.Open, nil)
+	testHookReturnValues(t, action, err)
+
+	want := []map[string]interface{}{
+		{
+			"@level":   "info",
+			"@message": "test_instance.boop: Opening...",
+			"@module":  "terraform.ui",
+			"type":     "ephemeral_op_start",
+			"hook": map[string]interface{}{
+				"action": string("open"),
+				"resource": map[string]interface{}{
+					"addr":             string("test_instance.boop"),
+					"implied_provider": string("test"),
+					"module":           string(""),
+					"resource":         string("test_instance.boop"),
+					"resource_key":     nil,
+					"resource_name":    string("boop"),
+					"resource_type":    string("test_instance"),
+				},
+			},
+		},
+		{
+			"@level":   "info",
+			"@message": "test_instance.boop: Still opening... [1s elapsed]",
+			"@module":  "terraform.ui",
+			"type":     "ephemeral_op_progress",
+			"hook": map[string]interface{}{
+				"action":          string("open"),
+				"elapsed_seconds": float64(1),
+				"resource": map[string]interface{}{
+					"addr":             string("test_instance.boop"),
+					"implied_provider": string("test"),
+					"module":           string(""),
+					"resource":         string("test_instance.boop"),
+					"resource_key":     nil,
+					"resource_name":    string("boop"),
+					"resource_type":    string("test_instance"),
+				},
+			},
+		},
+		{
+			"@level":   "info",
+			"@message": "test_instance.boop: Still opening... [2s elapsed]",
+			"@module":  "terraform.ui",
+			"type":     "ephemeral_op_progress",
+			"hook": map[string]interface{}{
+				"action":          string("open"),
+				"elapsed_seconds": float64(2),
+				"resource": map[string]interface{}{
+					"addr":             string("test_instance.boop"),
+					"implied_provider": string("test"),
+					"module":           string(""),
+					"resource":         string("test_instance.boop"),
+					"resource_key":     nil,
+					"resource_name":    string("boop"),
+					"resource_type":    string("test_instance"),
+				},
+			},
+		},
+		{
+			"@level":   "info",
+			"@message": "test_instance.boop: Opening complete after 2s",
+			"@module":  "terraform.ui",
+			"type":     "ephemeral_op_complete",
+			"hook": map[string]interface{}{
+				"action":          string("open"),
+				"elapsed_seconds": float64(2),
+				"resource": map[string]interface{}{
+					"addr":             string("test_instance.boop"),
+					"implied_provider": string("test"),
+					"module":           string(""),
+					"resource":         string("test_instance.boop"),
+					"resource_key":     nil,
+					"resource_name":    string("boop"),
+					"resource_type":    string("test_instance"),
+				},
+			},
+		},
+	}
+
+	stdout := done(t).Stdout()
+
+	// time.Sleep can take longer than declared time
+	// so we only test the first lines we expect to see after sleeping
+	lines := strings.SplitN(stdout, "\n", 4)
+	firstLines := strings.Join(lines[:4], "\n")
+
+	testJSONViewOutputEquals(t, firstLines, want)
+}
+
+func TestJSONHook_EphemeralOp_error(t *testing.T) {
+	streams, done := terminal.StreamsForTesting(t)
+	hook := newJSONHook(NewJSONView(NewView(streams)))
+
+	addr := addrs.Resource{
+		Mode: addrs.ManagedResourceMode,
+		Type: "test_instance",
+		Name: "boop",
+	}.Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance)
+
+	action, err := hook.PreEphemeralOp(testJSONHookResourceID(addr), plans.Open)
+	testHookReturnValues(t, action, err)
+
+	action, err = hook.PostEphemeralOp(testJSONHookResourceID(addr), plans.Open, errors.New("test error"))
+	testHookReturnValues(t, action, err)
+
+	want := []map[string]interface{}{
+		{
+			"@level":   "info",
+			"@message": "test_instance.boop: Opening...",
+			"@module":  "terraform.ui",
+			"type":     "ephemeral_op_start",
+			"hook": map[string]interface{}{
+				"action": string("open"),
+				"resource": map[string]interface{}{
+					"addr":             string("test_instance.boop"),
+					"implied_provider": string("test"),
+					"module":           string(""),
+					"resource":         string("test_instance.boop"),
+					"resource_key":     nil,
+					"resource_name":    string("boop"),
+					"resource_type":    string("test_instance"),
+				},
+			},
+		},
+		{
+			"@level":   "info",
+			"@message": "test_instance.boop: Opening errored after 0s",
+			"@module":  "terraform.ui",
+			"type":     "ephemeral_op_errored",
+			"hook": map[string]interface{}{
+				"action":          string("open"),
+				"elapsed_seconds": float64(0),
+				"resource": map[string]interface{}{
+					"addr":             string("test_instance.boop"),
+					"implied_provider": string("test"),
+					"module":           string(""),
+					"resource":         string("test_instance.boop"),
+					"resource_key":     nil,
+					"resource_name":    string("boop"),
+					"resource_type":    string("test_instance"),
+				},
+			},
+		},
+	}
+
+	testJSONViewOutputEquals(t, done(t).Stdout(), want)
+}
+
+func TestJSONHook_actions(t *testing.T) {
+	streams, done := terminal.StreamsForTesting(t)
+	hook := newJSONHook(NewJSONView(NewView(streams)))
+
+	actionA := addrs.AbsActionInstance{
+		Module: addrs.RootModuleInstance,
+		Action: addrs.Action{
+			Type: "aws_lambda_invocation",
+			Name: "notify_slack",
+		}.Instance(addrs.IntKey(42)),
+	}
+
+	resourceA := addrs.Resource{
+		Mode: addrs.ManagedResourceMode,
+		Type: "test_instance",
+		Name: "boop",
+	}.Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance)
+
+	invocationA := addrs.AbsActionInvocationInstance{
+		TriggeringResource: resourceA,
+		Action:             actionA,
+		TriggerIndex:       23,
+	}
+
+	subModule := addrs.RootModuleInstance.Child("childMod", addrs.StringKey("infra"))
+	actionB := addrs.AbsActionInstance{
+		Module: subModule,
+		Action: addrs.Action{
+			Type: "ansible_playbook",
+			Name: "webserver",
+		}.Instance(addrs.NoKey),
+	}
+
+	resourceB := addrs.Resource{
+		Mode: addrs.ManagedResourceMode,
+		Type: "test_instance",
+		Name: "boop",
+	}.Instance(addrs.NoKey).Absolute(subModule)
+
+	invocationB := addrs.AbsActionInvocationInstance{
+		TriggeringResource: resourceB,
+		Action:             actionB,
+		TriggerIndex:       0,
+	}
+	action, err := hook.StartAction(testJSONHookActionID(invocationA))
+	testHookReturnValues(t, action, err)
+
+	action, err = hook.ProgressAction(testJSONHookActionID(invocationA), "Hello world from the lambda function")
+	testHookReturnValues(t, action, err)
+
+	action, err = hook.StartAction(testJSONHookActionID(invocationB))
+	testHookReturnValues(t, action, err)
+
+	action, err = hook.ProgressAction(testJSONHookActionID(invocationB), "TASK: [hello]\n ok: [localhost] => (item=Hello world from the ansible playbook]")
+	testHookReturnValues(t, action, err)
+
+	action, err = hook.CompleteAction(testJSONHookActionID(invocationB), nil)
+	testHookReturnValues(t, action, err)
+
+	action, err = hook.CompleteAction(testJSONHookActionID(invocationA), errors.New("lambda terminated with exit code 1"))
+	testHookReturnValues(t, action, err)
+
+	want := []map[string]interface{}{
+		{
+			"@level":   "info",
+			"@message": "test_instance.boop.trigger[23]: Action Started: action.aws_lambda_invocation.notify_slack[42]",
+			"@module":  "terraform.ui",
+			"type":     "action_start",
+			"hook": map[string]interface{}{
+				"action": map[string]interface{}{
+					"addr":             "action.aws_lambda_invocation.notify_slack[42]",
+					"module":           "",
+					"implied_provider": "aws",
+					"resource":         "action.aws_lambda_invocation.notify_slack[42]",
+					"resource_key":     float64(42),
+					"resource_name":    "notify_slack",
+					"resource_type":    "aws_lambda_invocation",
+				},
+				"resource": map[string]interface{}{
+					"addr":             "test_instance.boop",
+					"implied_provider": "test",
+					"module":           "",
+					"resource":         "test_instance.boop",
+					"resource_key":     nil,
+					"resource_name":    "boop",
+					"resource_type":    "test_instance",
+				},
+				"trigger_index": float64(23),
+			},
+		},
+		{
+			"@level":   "info",
+			"@message": "test_instance.boop (23): action.aws_lambda_invocation.notify_slack[42] - Hello world from the lambda function",
+			"@module":  "terraform.ui",
+			"type":     "action_progress",
+			"hook": map[string]interface{}{
+				"action": map[string]interface{}{
+					"addr":             "action.aws_lambda_invocation.notify_slack[42]",
+					"module":           "",
+					"implied_provider": "aws",
+					"resource":         "action.aws_lambda_invocation.notify_slack[42]",
+					"resource_key":     float64(42),
+					"resource_name":    "notify_slack",
+					"resource_type":    "aws_lambda_invocation",
+				},
+				"message": "Hello world from the lambda function",
+				"resource": map[string]interface{}{
+					"addr":             "test_instance.boop",
+					"implied_provider": "test",
+					"module":           "",
+					"resource":         "test_instance.boop",
+					"resource_key":     nil,
+					"resource_name":    "boop",
+					"resource_type":    "test_instance",
+				},
+				"trigger_index": float64(23),
+			},
+		},
+		{
+			"@level":   "info",
+			"@message": "module.childMod[\"infra\"].test_instance.boop.trigger[0]: Action Started: module.childMod[\"infra\"].action.ansible_playbook.webserver",
+			"@module":  "terraform.ui",
+			"type":     "action_start",
+			"hook": map[string]interface{}{
+				"action": map[string]interface{}{
+					"addr":             "module.childMod[\"infra\"].action.ansible_playbook.webserver",
+					"module":           "module.childMod[\"infra\"]",
+					"implied_provider": "ansible",
+					"resource":         "action.ansible_playbook.webserver",
+					"resource_key":     nil,
+					"resource_name":    "webserver",
+					"resource_type":    "ansible_playbook",
+				},
+				"resource": map[string]interface{}{
+					"addr":             "module.childMod[\"infra\"].test_instance.boop",
+					"implied_provider": "test",
+					"module":           "module.childMod[\"infra\"]",
+					"resource":         "test_instance.boop",
+					"resource_key":     nil,
+					"resource_name":    "boop",
+					"resource_type":    "test_instance",
+				},
+				"trigger_index": float64(0),
+			},
+		},
+		{
+			"@level":   "info",
+			"@message": "module.childMod[\"infra\"].test_instance.boop (0): module.childMod[\"infra\"].action.ansible_playbook.webserver - TASK: [hello]\n ok: [localhost] => (item=Hello world from the ansible playbook]",
+			"@module":  "terraform.ui",
+			"type":     "action_progress",
+			"hook": map[string]interface{}{
+				"action": map[string]interface{}{
+					"addr":             "module.childMod[\"infra\"].action.ansible_playbook.webserver",
+					"module":           "module.childMod[\"infra\"]",
+					"implied_provider": "ansible",
+					"resource":         "action.ansible_playbook.webserver",
+					"resource_key":     nil,
+					"resource_name":    "webserver",
+					"resource_type":    "ansible_playbook",
+				},
+				"message": "TASK: [hello]\n ok: [localhost] => (item=Hello world from the ansible playbook]",
+				"resource": map[string]interface{}{
+					"addr":             "module.childMod[\"infra\"].test_instance.boop",
+					"implied_provider": "test",
+					"module":           "module.childMod[\"infra\"]",
+					"resource":         "test_instance.boop",
+					"resource_key":     nil,
+					"resource_name":    "boop",
+					"resource_type":    "test_instance",
+				},
+				"trigger_index": float64(0),
+			},
+		},
+		{
+			"@level":   "info",
+			"@message": "module.childMod[\"infra\"].test_instance.boop (0): Action Complete: module.childMod[\"infra\"].action.ansible_playbook.webserver",
+			"@module":  "terraform.ui",
+			"type":     "action_complete",
+			"hook": map[string]interface{}{
+				"action": map[string]interface{}{
+					"addr":             "module.childMod[\"infra\"].action.ansible_playbook.webserver",
+					"module":           "module.childMod[\"infra\"]",
+					"implied_provider": "ansible",
+					"resource":         "action.ansible_playbook.webserver",
+					"resource_key":     nil,
+					"resource_name":    "webserver",
+					"resource_type":    "ansible_playbook",
+				},
+				"resource": map[string]interface{}{
+					"addr":             "module.childMod[\"infra\"].test_instance.boop",
+					"implied_provider": "test",
+					"module":           "module.childMod[\"infra\"]",
+					"resource":         "test_instance.boop",
+					"resource_key":     nil,
+					"resource_name":    "boop",
+					"resource_type":    "test_instance",
+				},
+				"trigger_index": float64(0),
+			},
+		},
+		{
+			"@level":   "info",
+			"@message": "test_instance.boop (23): Action Errored: action.aws_lambda_invocation.notify_slack[42] - lambda terminated with exit code 1",
+			"@module":  "terraform.ui",
+			"type":     "action_errored",
+			"hook": map[string]interface{}{
+				"action": map[string]interface{}{
+					"addr":             "action.aws_lambda_invocation.notify_slack[42]",
+					"module":           "",
+					"implied_provider": "aws",
+					"resource":         "action.aws_lambda_invocation.notify_slack[42]",
+					"resource_key":     float64(42),
+					"resource_name":    "notify_slack",
+					"resource_type":    "aws_lambda_invocation",
+				},
+				"error": "lambda terminated with exit code 1",
+				"resource": map[string]interface{}{
+					"addr":             "test_instance.boop",
+					"implied_provider": "test",
+					"module":           "",
+					"resource":         "test_instance.boop",
+					"resource_key":     nil,
+					"resource_name":    "boop",
+					"resource_type":    "test_instance",
+				},
+				"trigger_index": float64(23),
 			},
 		},
 	}

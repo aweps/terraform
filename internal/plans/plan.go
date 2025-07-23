@@ -7,10 +7,14 @@ import (
 	"sort"
 	"time"
 
+	version "github.com/hashicorp/go-version"
+	tfaddr "github.com/hashicorp/terraform-registry-address"
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/hashicorp/terraform/internal/addrs"
+	"github.com/hashicorp/terraform/internal/collections"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
+	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/lang/globalref"
 	"github.com/hashicorp/terraform/internal/moduletest/mocking"
 	"github.com/hashicorp/terraform/internal/states"
@@ -41,12 +45,61 @@ type Plan struct {
 	// checked carefully against existing destroy behaviors.
 	UIMode Mode
 
-	VariableValues    map[string]DynamicValue
-	Changes           *Changes
+	// VariableValues, VariableMarks, and ApplyTimeVariables together describe
+	// how Terraform should decide the input variable values for the apply
+	// phase if this plan is to be applied.
+	//
+	// VariableValues and VariableMarks describe persisted (non-ephemeral)
+	// values that were set as part of the planning options and are to be
+	// re-used during the apply phase. VariableValues can potentially contain
+	// unknown values for a speculative plan, but the variable values must
+	// all be known for a plan that will subsequently be applied.
+	//
+	// ApplyTimeVariables retains the names of any ephemeral variables that were
+	// set (non-null) during the planning phase and must therefore be
+	// re-supplied by the caller (potentially with different values) during
+	// the apply phase. Ephemeral input variables are intended for populating
+	// arguments for other ephemeral objects in the configuration, such as
+	// provider configurations. Although the values for these variables can
+	// change between plan and apply, their "nullness" may not.
+	VariableValues     map[string]DynamicValue
+	VariableMarks      map[string][]cty.PathValueMarks
+	ApplyTimeVariables collections.Set[string]
+
+	Changes           *ChangesSrc
+	ActionInvocations []*ActionInvocationInstanceSrc
 	DriftedResources  []*ResourceInstanceChangeSrc
+	DeferredResources []*DeferredResourceInstanceChangeSrc
 	TargetAddrs       []addrs.Targetable
 	ForceReplaceAddrs []addrs.AbsResourceInstance
-	Backend           Backend
+
+	Backend    Backend
+	StateStore StateStore
+
+	// Complete is true if Terraform considers this to be a "complete" plan,
+	// which is to say that it includes a planned action (even if no-op)
+	// for every resource instance object that was mentioned across both
+	// the desired state and prior state.
+	//
+	// If Complete is false then the plan might still be applyable (check
+	// [Plan.Applyable]) but after applying it the operator should be reminded
+	// to plan and apply again to hopefully make more progress towards
+	// convergence.
+	//
+	// For an incomplete plan, other fields of this type may give more context
+	// about why the plan is incomplete, which a UI layer could present to
+	// the user as part of a warning that the plan is incomplete.
+	Complete bool
+
+	// Applyable is true if both Terraform was able to create a plan
+	// successfully and if the plan calls for making some sort of meaningful
+	// change.
+	//
+	// If [Plan.Errored] is also set then that means the plan is non-applyable
+	// due to an error. If not then the plan was created successfully but found
+	// no material differences between desired and prior state, and so
+	// applying this plan would achieve nothing.
+	Applyable bool
 
 	// Errored is true if the Changes information is incomplete because
 	// the planning operation failed. An errored plan cannot be applied,
@@ -90,14 +143,8 @@ type Plan struct {
 	PrevRunState *states.State
 	PriorState   *states.State
 
-	// PlannedState is the temporary planned state that was created during the
-	// graph walk that generated this plan.
-	//
-	// This is required by the testing framework when evaluating run blocks
-	// executing in plan mode. The graph updates the state with certain values
-	// that are difficult to retrieve later, such as local values that reference
-	// updated resources. It is easier to build the testing scope with access
-	// to same temporary state the plan used/built.
+	// ExternalReferences are references that are being made to resources within
+	// the plan from external sources.
 	//
 	// This is never recorded outside of Terraform. It is not written into the
 	// binary plan file, and it is not written into the JSON structured outputs.
@@ -105,70 +152,22 @@ type Plan struct {
 	// memory as it executes, so there is no need to add any kind of
 	// serialization for this field. This does mean that you shouldn't rely on
 	// this field existing unless you have just generated the plan.
-	PlannedState *states.State
-
-	// ExternalReferences are references that are being made to resources within
-	// the plan from external sources. As with PlannedState this is used by the
-	// terraform testing framework, and so isn't written into any external
-	// representation of the plan.
 	ExternalReferences []*addrs.Reference
 
 	// Overrides contains the set of overrides that were applied while making
 	// this plan. We need to provide the same set of overrides when applying
-	// the plan so we preserve them here. As with PlannedState and
-	// ExternalReferences, this is only used by the testing framework and so
-	// isn't written into any external representation of the plan.
+	// the plan so we preserve them here. As with  ExternalReferences, this is
+	// only used by the testing framework and so isn't written into any external
+	// representation of the plan.
 	Overrides *mocking.Overrides
 
 	// Timestamp is the record of truth for when the plan happened.
 	Timestamp time.Time
-}
 
-// CanApply returns true if and only if the recieving plan includes content
-// that would make sense to apply. If it returns false, the plan operation
-// should indicate that there's nothing to do and Terraform should exit
-// without prompting the user to confirm the changes.
-//
-// This function represents our main business logic for making the decision
-// about whether a given plan represents meaningful "changes", and so its
-// exact definition may change over time; the intent is just to centralize the
-// rules for that rather than duplicating different versions of it at various
-// locations in the UI code.
-func (p *Plan) CanApply() bool {
-	switch {
-	case p.Errored:
-		// An errored plan can never be applied, because it is incomplete.
-		// Such a plan is only useful for describing the subset of actions
-		// planned so far in case they are useful for understanding the
-		// causes of the errors.
-		return false
-
-	case !p.Changes.Empty():
-		// "Empty" means that everything in the changes is a "NoOp", so if
-		// not empty then there's at least one non-NoOp change.
-		return true
-
-	case !p.PriorState.ManagedResourcesEqual(p.PrevRunState):
-		// If there are no changes planned but we detected some
-		// outside-Terraform changes while refreshing then we consider
-		// that applyable in isolation only if this was a refresh-only
-		// plan where we expect updating the state to include these
-		// changes was the intended goal.
-		//
-		// (We don't treat a "refresh only" plan as applyable in normal
-		// planning mode because historically the refresh result wasn't
-		// considered part of a plan at all, and so it would be
-		// a disruptive breaking change if refreshing alone suddenly
-		// became applyable in the normal case and an existing configuration
-		// was relying on ignore_changes in order to be convergent in spite
-		// of intentional out-of-band operations.)
-		return p.UIMode == RefreshOnlyMode
-
-	default:
-		// Otherwise, there are either no changes to apply or they are changes
-		// our cases above don't consider as worthy of applying in isolation.
-		return false
-	}
+	// FunctionResults stores hashed results from all providers function calls
+	// and builtin calls which may access external state so that calls during
+	// apply can be checked for consistency.
+	FunctionResults []lang.FunctionResultHash
 }
 
 // ProviderAddrs returns a list of all of the provider configuration addresses
@@ -233,4 +232,86 @@ func NewBackend(typeName string, config cty.Value, configSchema *configschema.Bl
 		Config:    dv,
 		Workspace: workspaceName,
 	}, nil
+}
+
+// StateStore represents the state store-related configuration and other data as it
+// existed when a plan was created.
+type StateStore struct {
+	// Type is the type of state store that the plan will apply against.
+	Type string
+
+	Provider *Provider
+
+	// Config is the configuration of the state store, whose schema is obtained
+	// from the host provider's GetProviderSchema response.
+	Config DynamicValue
+
+	// Workspace is the name of the workspace that was active when the plan
+	// was created. It is illegal to apply a plan created for one workspace
+	// to the state of another workspace.
+	// (This constraint is already enforced by the statefile lineage mechanism,
+	// but storing this explicitly allows us to return a better error message
+	// in the situation where the user has the wrong workspace selected.)
+	Workspace string
+}
+
+type Provider struct {
+	Version *version.Version // The specific provider version used for the state store. Should be set using a getproviders.Version, etc.
+	Source  *tfaddr.Provider // The FQN/fully-qualified name of the provider.
+
+	// Config is the configuration of the state store, whose schema is obtained
+	// from the host provider's GetProviderSchema response.
+	Config DynamicValue
+}
+
+func NewStateStore(typeName string, ver *version.Version, source *tfaddr.Provider, storeConfig cty.Value, storeSchema *configschema.Block, providerConfig cty.Value, providerSchema *configschema.Block, workspaceName string) (*StateStore, error) {
+	sdv, err := NewDynamicValue(storeConfig, storeSchema.ImpliedType())
+	if err != nil {
+		return nil, err
+	}
+	pdv, err := NewDynamicValue(providerConfig, providerSchema.ImpliedType())
+	if err != nil {
+		return nil, err
+	}
+
+	provider := &Provider{
+		Version: ver,
+		Source:  source,
+		Config:  pdv,
+	}
+
+	return &StateStore{
+		Type:      typeName,
+		Provider:  provider,
+		Config:    sdv,
+		Workspace: workspaceName,
+	}, nil
+}
+
+// SetVersion includes logic for parsing a string representation of a version,
+// for example data read from a plan file.
+// If an error occurs it is returned and the receiver's Version field is unchanged.
+// If there are no errors then the receiver's Version field is updated.
+func (p *Provider) SetVersion(input string) error {
+	ver, err := version.NewVersion(input)
+	if err != nil {
+		return err
+	}
+
+	p.Version = ver
+	return nil
+}
+
+// SetSource includes logic for parsing a string representation of a provider source,
+// for example data read from a plan file.
+// If an error occurs it is returned and the receiver's Source field is unchanged.
+// If there are no errors then the receiver's Source field is updated.
+func (p *Provider) SetSource(input string) error {
+	source, diags := addrs.ParseProviderSourceString(input)
+	if diags.HasErrors() {
+		return diags.ErrWithWarnings()
+	}
+
+	p.Source = &source
+	return nil
 }

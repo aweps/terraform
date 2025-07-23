@@ -5,6 +5,12 @@ description: >-
   defaults to replace invalid values.
 ---
 
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+> [!IMPORTANT]  
+> **Documentation Update:** Product documentation previously located in `/website` has moved to the [`hashicorp/web-unified-docs`](https://github.com/hashicorp/web-unified-docs) repository, where all product documentation is now centralized. Please make contributions directly to `web-unified-docs`, since changes to `/website` in this repository will not appear on developer.hashicorp.com.
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+
+
 # Conditional Expressions
 
 A _conditional expression_ uses the value of a boolean expression to select one of
@@ -26,8 +32,8 @@ If `condition` is `true` then the result is `true_val`. If `condition` is
 A common use of conditional expressions is to define defaults to replace
 invalid values:
 
-```
-var.a != "" ? var.a : "default-a"
+```hcl
+var.a == "" ? "default-a" : var.a
 ```
 
 If `var.a` is an empty string then the result is `"default-a"`, but otherwise

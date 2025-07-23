@@ -6,6 +6,12 @@ description: >-
   data.
 ---
 
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+> [!IMPORTANT]  
+> **Documentation Update:** Product documentation previously located in `/website` has moved to the [`hashicorp/web-unified-docs`](https://github.com/hashicorp/web-unified-docs) repository, where all product documentation is now centralized. Please make contributions directly to `web-unified-docs`, since changes to `/website` in this repository will not appear on developer.hashicorp.com.
+⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️
+
+
 # References to Named Values
 
 > **Hands-on:** Try the [Create Dynamic Expressions](/terraform/tutorials/configuration-language/expressions?utm_source=WEBSITE&utm_medium=WEB_IO&utm_offer=ARTICLE_PAGE&utm_content=DOCS) tutorial.
@@ -295,7 +301,7 @@ certain attributes as _sensitive_, in which case Terraform will show a
 placeholder marker `(sensitive value)` instead of the actual value when rendering
 a plan involving that attribute.
 
-A provider attribute marked as sensitive behaves similarly to an
+A provider attribute marked as sensitive behaves similarly to
 [an input variable declared as sensitive](/terraform/language/values/variables#suppressing-values-in-cli-output),
 where Terraform will hide the value in the plan and apply messages and will
 also hide any other values you derive from it as sensitive.

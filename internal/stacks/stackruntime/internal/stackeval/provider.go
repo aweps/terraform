@@ -7,70 +7,48 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/zclconf/go-cty/cty"
+
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/instances"
 	"github.com/hashicorp/terraform/internal/promising"
 	"github.com/hashicorp/terraform/internal/stacks/stackaddrs"
-	"github.com/hashicorp/terraform/internal/stacks/stackconfig"
 	"github.com/hashicorp/terraform/internal/stacks/stackplan"
 	"github.com/hashicorp/terraform/internal/stacks/stackstate"
 	"github.com/hashicorp/terraform/internal/tfdiags"
-	"github.com/zclconf/go-cty/cty"
 )
 
 // Provider represents a provider configuration in a particular stack config.
 type Provider struct {
 	addr   stackaddrs.AbsProviderConfig
-	config *stackconfig.ProviderConfig
+	config *ProviderConfig
+	stack  *Stack
 
 	main *Main
 
 	forEachValue perEvalPhase[promising.Once[withDiagnostics[cty.Value]]]
-	instances    perEvalPhase[promising.Once[withDiagnostics[map[addrs.InstanceKey]*ProviderInstance]]]
+	instances    perEvalPhase[promising.Once[withDiagnostics[instancesResult[*ProviderInstance]]]]
 }
 
-func newProvider(main *Main, addr stackaddrs.AbsProviderConfig, config *stackconfig.ProviderConfig) *Provider {
+func newProvider(main *Main, addr stackaddrs.AbsProviderConfig, stack *Stack, config *ProviderConfig) *Provider {
 	return &Provider{
 		addr:   addr,
+		stack:  stack,
 		config: config,
 		main:   main,
 	}
 }
 
-func (p *Provider) Addr() stackaddrs.AbsProviderConfig {
-	return p.addr
-}
-
-func (p *Provider) Declaration(ctx context.Context) *stackconfig.ProviderConfig {
-	return p.config
-}
-
-func (p *Provider) Config(ctx context.Context) *ProviderConfig {
-	configAddr := stackaddrs.ConfigForAbs(p.Addr())
-	stackConfig := p.main.StackConfig(ctx, configAddr.Stack)
-	if stackConfig == nil {
-		return nil
-	}
-	return stackConfig.Provider(ctx, configAddr.Item)
-}
-
-func (p *Provider) ProviderType(ctx context.Context) *ProviderType {
-	return p.main.ProviderType(ctx, p.Addr().Item.Provider)
-}
-
-func (p *Provider) Stack(ctx context.Context) *Stack {
-	// Unchecked because we should've been constructed from the same stack
-	// object we're about to return, and so this should be valid unless
-	// the original construction was from an invalid object itself.
-	return p.main.StackUnchecked(ctx, p.Addr().Stack)
+func (p *Provider) ProviderType() *ProviderType {
+	return p.main.ProviderType(p.addr.Item.Provider)
 }
 
 // InstRefValueType returns the type of any values that represent references to
 // instances of this provider configuration.
 //
 // All configurations for the same provider share the same type.
-func (p *Provider) InstRefValueType(ctx context.Context) cty.Type {
-	decl := p.Declaration(ctx)
+func (p *Provider) InstRefValueType() cty.Type {
+	decl := p.config.config
 	return providerInstanceRefType(decl.ProviderAddr)
 }
 
@@ -108,31 +86,19 @@ func (p *Provider) ForEachValue(ctx context.Context, phase EvalPhase) cty.Value 
 // that we cannot know the for_each value.
 func (p *Provider) CheckForEachValue(ctx context.Context, phase EvalPhase) (cty.Value, tfdiags.Diagnostics) {
 	val, diags := doOnceWithDiags(
-		ctx, p.forEachValue.For(phase), p.main,
+		ctx, p.tracingName()+" for_each", p.forEachValue.For(phase),
 		func(ctx context.Context) (cty.Value, tfdiags.Diagnostics) {
 			var diags tfdiags.Diagnostics
-			cfg := p.Declaration(ctx)
+			cfg := p.config.config
 
 			switch {
 
 			case cfg.ForEach != nil:
-				result, moreDiags := evaluateForEachExpr(ctx, cfg.ForEach, phase, p.Stack(ctx))
+				result, moreDiags := evaluateForEachExpr(ctx, cfg.ForEach, phase, p.stack, "provider")
 				diags = diags.Append(moreDiags)
 				if diags.HasErrors() {
 					return cty.DynamicVal, diags
 				}
-
-				if !result.Value.IsKnown() {
-					// FIXME: We should somehow allow this and emit a
-					// "deferred change" representing all of the as-yet-unknown
-					// instances of this call and everything beneath it.
-					diags = diags.Append(result.Diagnostic(
-						tfdiags.Error,
-						"Invalid for_each value",
-						"The for_each value must not be derived from values that will be determined only during the apply phase.",
-					))
-				}
-
 				return result.Value, diags
 
 			default:
@@ -166,35 +132,45 @@ func (p *Provider) CheckForEachValue(ctx context.Context, phase EvalPhase) (cty.
 // for_each expression is invalid because we assume that the main plan walk
 // will visit the stack call directly and ask it to check itself, and that
 // call will be the one responsible for returning any diagnostics.
-func (p *Provider) Instances(ctx context.Context, phase EvalPhase) map[addrs.InstanceKey]*ProviderInstance {
-	ret, _ := p.CheckInstances(ctx, phase)
-	return ret
+func (p *Provider) Instances(ctx context.Context, phase EvalPhase) (map[addrs.InstanceKey]*ProviderInstance, bool) {
+	ret, unknown, _ := p.CheckInstances(ctx, phase)
+	return ret, unknown
 }
 
-func (p *Provider) CheckInstances(ctx context.Context, phase EvalPhase) (map[addrs.InstanceKey]*ProviderInstance, tfdiags.Diagnostics) {
-	return doOnceWithDiags(
-		ctx, p.instances.For(phase), p.main,
-		func(ctx context.Context) (map[addrs.InstanceKey]*ProviderInstance, tfdiags.Diagnostics) {
-			var diags tfdiags.Diagnostics
-			forEachVal := p.ForEachValue(ctx, phase)
+func (p *Provider) CheckInstances(ctx context.Context, phase EvalPhase) (map[addrs.InstanceKey]*ProviderInstance, bool, tfdiags.Diagnostics) {
+	result, diags := doOnceWithDiags(
+		ctx, p.tracingName()+" instances", p.instances.For(phase),
+		func(ctx context.Context) (instancesResult[*ProviderInstance], tfdiags.Diagnostics) {
+			forEachVal, diags := p.CheckForEachValue(ctx, phase)
+			if diags.HasErrors() {
+				return instancesResult[*ProviderInstance]{}, diags
+			}
+
 			return instancesMap(forEachVal, func(ik addrs.InstanceKey, rd instances.RepetitionData) *ProviderInstance {
-				return newProviderInstance(p, ik, rd)
+				return newProviderInstance(p, stackaddrs.AbsProviderToInstance(p.addr, ik), rd)
 			}), diags
 		},
 	)
+	return result.insts, result.unknown, diags
 }
 
 // ExprReferenceValue implements Referenceable, returning a value containing
 // one or more values that act as references to instances of the provider.
 func (p *Provider) ExprReferenceValue(ctx context.Context, phase EvalPhase) cty.Value {
-	decl := p.Declaration(ctx)
-	insts := p.Instances(ctx, phase)
-	refType := p.InstRefValueType(ctx)
+	decl := p.config.config
+	insts, unknown := p.Instances(ctx, phase)
+	refType := p.InstRefValueType()
 
 	switch {
 	case decl.ForEach != nil:
-		if insts == nil {
+		if unknown {
 			return cty.UnknownVal(cty.Map(refType))
+		}
+
+		if insts == nil {
+			// Then we errored during instance calculation, this should have
+			// been caught before we got here.
+			return cty.NilVal
 		}
 		elems := make(map[string]cty.Value, len(insts))
 		for instKey := range insts {
@@ -203,9 +179,9 @@ func (p *Provider) ExprReferenceValue(ctx context.Context, phase EvalPhase) cty.
 				panic(fmt.Sprintf("provider config with for_each has invalid instance key of type %T", instKey))
 			}
 			elems[string(k)] = cty.CapsuleVal(refType, &stackaddrs.AbsProviderConfigInstance{
-				Stack: p.Addr().Stack,
+				Stack: p.addr.Stack,
 				Item: stackaddrs.ProviderConfigInstance{
-					ProviderConfig: p.Addr().Item,
+					ProviderConfig: p.addr.Item,
 					Key:            instKey,
 				},
 			})
@@ -219,9 +195,9 @@ func (p *Provider) ExprReferenceValue(ctx context.Context, phase EvalPhase) cty.
 			return cty.UnknownVal(refType)
 		}
 		return cty.CapsuleVal(refType, &stackaddrs.AbsProviderConfigInstance{
-			Stack: p.Addr().Stack,
+			Stack: p.addr.Stack,
 			Item: stackaddrs.ProviderConfigInstance{
-				ProviderConfig: p.Addr().Item,
+				ProviderConfig: p.addr.Item,
 				Key:            addrs.NoKey,
 			},
 		})
@@ -233,7 +209,7 @@ func (p *Provider) checkValid(ctx context.Context, phase EvalPhase) tfdiags.Diag
 
 	_, moreDiags := p.CheckForEachValue(ctx, phase)
 	diags = diags.Append(moreDiags)
-	_, moreDiags = p.CheckInstances(ctx, phase)
+	_, _, moreDiags = p.CheckInstances(ctx, phase)
 	diags = diags.Append(moreDiags)
 	// Everything else is instance-specific and so the plan walk driver must
 	// call p.Instances and ask each instance to plan itself.
@@ -246,6 +222,17 @@ func (p *Provider) PlanChanges(ctx context.Context) ([]stackplan.PlannedChange, 
 	return nil, p.checkValid(ctx, PlanPhase)
 }
 
+// References implements Referrer
+func (p *Provider) References(ctx context.Context) []stackaddrs.AbsReference {
+	cfg := p.config.config
+	var ret []stackaddrs.Reference
+	ret = append(ret, ReferencesInExpr(cfg.ForEach)...)
+	if schema, err := p.ProviderType().Schema(ctx); err == nil {
+		ret = append(ret, ReferencesInBody(cfg.Config, schema.Provider.Body.DecoderSpec())...)
+	}
+	return makeReferencesAbsolute(ret, p.addr.Stack)
+}
+
 // CheckApply implements ApplyChecker.
 func (p *Provider) CheckApply(ctx context.Context) ([]stackstate.AppliedChange, tfdiags.Diagnostics) {
 	return nil, p.checkValid(ctx, ApplyPhase)
@@ -253,5 +240,5 @@ func (p *Provider) CheckApply(ctx context.Context) ([]stackstate.AppliedChange, 
 
 // tracingName implements Plannable.
 func (p *Provider) tracingName() string {
-	return p.Addr().String()
+	return p.addr.String()
 }

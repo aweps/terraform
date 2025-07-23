@@ -4,23 +4,29 @@
 package terraform
 
 import (
+	"context"
+
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hcldec"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
 
+	"github.com/hashicorp/terraform/internal/actions"
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/checks"
 	"github.com/hashicorp/terraform/internal/configs"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
+	"github.com/hashicorp/terraform/internal/experiments"
 	"github.com/hashicorp/terraform/internal/instances"
 	"github.com/hashicorp/terraform/internal/lang"
 	"github.com/hashicorp/terraform/internal/moduletest/mocking"
 	"github.com/hashicorp/terraform/internal/namedvals"
 	"github.com/hashicorp/terraform/internal/plans"
+	"github.com/hashicorp/terraform/internal/plans/deferring"
 	"github.com/hashicorp/terraform/internal/providers"
 	"github.com/hashicorp/terraform/internal/provisioners"
 	"github.com/hashicorp/terraform/internal/refactoring"
+	"github.com/hashicorp/terraform/internal/resources/ephemeral"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/tfdiags"
 )
@@ -28,8 +34,8 @@ import (
 // MockEvalContext is a mock version of EvalContext that can be used
 // for tests.
 type MockEvalContext struct {
-	StoppedCalled bool
-	StoppedValue  <-chan struct{}
+	StopCtxCalled bool
+	StopCtxValue  context.Context
 
 	HookCalled bool
 	HookHook   Hook
@@ -52,6 +58,11 @@ type MockEvalContext struct {
 	ProviderSchemaAddr   addrs.AbsProviderConfig
 	ProviderSchemaSchema providers.ProviderSchema
 	ProviderSchemaError  error
+
+	ResourceIdentitySchemasCalled  bool
+	ResourceIdentitySchemasAddr    addrs.AbsProviderConfig
+	ResourceIdentitySchemasSchemas providers.ResourceIdentitySchemas
+	ResourceIdentitySchemasError   error
 
 	CloseProviderCalled   bool
 	CloseProviderAddr     addrs.AbsProviderConfig
@@ -82,7 +93,7 @@ type MockEvalContext struct {
 	ProvisionerSchemaSchema *configschema.Block
 	ProvisionerSchemaError  error
 
-	CloseProvisionersCalled bool
+	ClosePluginsCalled bool
 
 	EvaluateBlockCalled     bool
 	EvaluateBlockBody       hcl.Body
@@ -117,10 +128,15 @@ type MockEvalContext struct {
 	EvaluationScopeScope   *lang.Scope
 
 	PathCalled bool
-	PathPath   addrs.ModuleInstance
+	Scope      evalContextScope
+
+	LanguageExperimentsActive experiments.Set
 
 	NamedValuesCalled bool
 	NamedValuesState  *namedvals.State
+
+	DeferralsCalled bool
+	DeferralsState  *deferring.Deferred
 
 	ChangesCalled  bool
 	ChangesChanges *plans.ChangesSync
@@ -143,16 +159,28 @@ type MockEvalContext struct {
 	InstanceExpanderCalled   bool
 	InstanceExpanderExpander *instances.Expander
 
+	EphemeralResourcesCalled    bool
+	EphemeralResourcesResources *ephemeral.Resources
+
 	OverridesCalled bool
 	OverrideValues  *mocking.Overrides
+
+	ForgetCalled bool
+	ForgetValues bool
+
+	ActionsCalled bool
+	ActionsState  *actions.Actions
 }
 
 // MockEvalContext implements EvalContext
 var _ EvalContext = (*MockEvalContext)(nil)
 
-func (c *MockEvalContext) Stopped() <-chan struct{} {
-	c.StoppedCalled = true
-	return c.StoppedValue
+func (c *MockEvalContext) StopCtx() context.Context {
+	c.StopCtxCalled = true
+	if c.StopCtxValue != nil {
+		return c.StopCtxValue
+	}
+	return context.TODO()
 }
 
 func (c *MockEvalContext) Hook(fn func(Hook) (HookAction, error)) error {
@@ -188,6 +216,12 @@ func (c *MockEvalContext) ProviderSchema(addr addrs.AbsProviderConfig) (provider
 	c.ProviderSchemaCalled = true
 	c.ProviderSchemaAddr = addr
 	return c.ProviderSchemaSchema, c.ProviderSchemaError
+}
+
+func (c *MockEvalContext) ResourceIdentitySchemas(addr addrs.AbsProviderConfig) (providers.ResourceIdentitySchemas, error) {
+	c.ResourceIdentitySchemasCalled = true
+	c.ResourceIdentitySchemasAddr = addr
+	return c.ResourceIdentitySchemasSchemas, c.ProviderSchemaError
 }
 
 func (c *MockEvalContext) CloseProvider(addr addrs.AbsProviderConfig) error {
@@ -231,8 +265,8 @@ func (c *MockEvalContext) ProvisionerSchema(n string) (*configschema.Block, erro
 	return c.ProvisionerSchemaSchema, c.ProvisionerSchemaError
 }
 
-func (c *MockEvalContext) CloseProvisioners() error {
-	c.CloseProvisionersCalled = true
+func (c *MockEvalContext) ClosePlugins() error {
+	c.ClosePluginsCalled = true
 	return nil
 }
 
@@ -323,20 +357,42 @@ func (c *MockEvalContext) EvaluationScope(self addrs.Referenceable, source addrs
 	return c.EvaluationScopeScope
 }
 
-func (c *MockEvalContext) WithPath(path addrs.ModuleInstance) EvalContext {
+func (c *MockEvalContext) withScope(scope evalContextScope) EvalContext {
 	newC := *c
-	newC.PathPath = path
+	newC.Scope = scope
 	return &newC
 }
 
 func (c *MockEvalContext) Path() addrs.ModuleInstance {
 	c.PathCalled = true
-	return c.PathPath
+	// This intentionally panics if scope isn't a module instance; callers
+	// should use this only for an eval context that's working in a
+	// fully-expanded module instance.
+	return c.Scope.(evalContextModuleInstance).Addr
+}
+
+func (c *MockEvalContext) LanguageExperimentActive(experiment experiments.Experiment) bool {
+	// This particular function uses a live data structure so that tests can
+	// exercise different experiments being enabled; there is little reason
+	// to directly test whether this function was called since we use this
+	// function only temporarily while an experiment is active, and then
+	// remove the calls once the experiment is concluded.
+	return c.LanguageExperimentsActive.Has(experiment)
 }
 
 func (c *MockEvalContext) NamedValues() *namedvals.State {
 	c.NamedValuesCalled = true
 	return c.NamedValuesState
+}
+
+func (c *MockEvalContext) EphemeralResources() *ephemeral.Resources {
+	c.EphemeralResourcesCalled = true
+	return c.EphemeralResourcesResources
+}
+
+func (c *MockEvalContext) Deferrals() *deferring.Deferred {
+	c.DeferralsCalled = true
+	return c.DeferralsState
 }
 
 func (c *MockEvalContext) Changes() *plans.ChangesSync {
@@ -377,4 +433,21 @@ func (c *MockEvalContext) InstanceExpander() *instances.Expander {
 func (c *MockEvalContext) Overrides() *mocking.Overrides {
 	c.OverridesCalled = true
 	return c.OverrideValues
+}
+
+func (c *MockEvalContext) Forget() bool {
+	c.ForgetCalled = true
+	return c.ForgetValues
+}
+
+func (ctx *MockEvalContext) ClientCapabilities() providers.ClientCapabilities {
+	return providers.ClientCapabilities{
+		DeferralAllowed:            ctx.Deferrals().DeferralAllowed(),
+		WriteOnlyAttributesAllowed: true,
+	}
+}
+
+func (c *MockEvalContext) Actions() *actions.Actions {
+	c.ActionsCalled = true
+	return c.ActionsState
 }

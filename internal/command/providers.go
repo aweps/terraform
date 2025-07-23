@@ -49,7 +49,7 @@ func (c *ProvidersCommand) Run(args []string) int {
 
 	var diags tfdiags.Diagnostics
 
-	empty, err := configs.IsEmptyDir(configPath)
+	empty, err := configs.IsEmptyDir(configPath, testsDirectory)
 	if err != nil {
 		diags = diags.Append(tfdiags.Sourceless(
 			tfdiags.Error,
@@ -82,7 +82,7 @@ func (c *ProvidersCommand) Run(args []string) int {
 
 	// Load the backend
 	b, backendDiags := c.Backend(&BackendOpts{
-		Config: config.Module.Backend,
+		BackendConfig: config.Module.Backend,
 	})
 	diags = diags.Append(backendDiags)
 	if backendDiags.HasErrors() {

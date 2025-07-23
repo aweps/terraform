@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform/internal/backend"
 	"github.com/hashicorp/terraform/internal/configs/configschema"
 	"github.com/hashicorp/terraform/internal/providers"
+	testing_provider "github.com/hashicorp/terraform/internal/providers/testing"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/states/statemgr"
 	"github.com/hashicorp/terraform/internal/terraform"
@@ -42,9 +43,9 @@ func TestLocal(t *testing.T) *Local {
 
 // TestLocalProvider modifies the ContextOpts of the *Local parameter to
 // have a provider with the given name.
-func TestLocalProvider(t *testing.T, b *Local, name string, schema providers.ProviderSchema) *terraform.MockProvider {
+func TestLocalProvider(t *testing.T, b *Local, name string, schema providers.ProviderSchema) *testing_provider.MockProvider {
 	// Build a mock resource provider for in-memory operations
-	p := new(terraform.MockProvider)
+	p := new(testing_provider.MockProvider)
 
 	p.GetProviderSchemaResponse = &schema
 
@@ -56,19 +57,19 @@ func TestLocalProvider(t *testing.T, b *Local, name string, schema providers.Pro
 			return resp
 		}
 
-		rSchema, _ := schema.SchemaForResourceType(addrs.ManagedResourceMode, req.TypeName)
-		if rSchema == nil {
-			rSchema = &configschema.Block{} // default schema is empty
+		rSchema := schema.SchemaForResourceType(addrs.ManagedResourceMode, req.TypeName)
+		if rSchema.Body == nil {
+			rSchema.Body = &configschema.Block{} // default schema is empty
 		}
 		plannedVals := map[string]cty.Value{}
-		for name, attrS := range rSchema.Attributes {
+		for name, attrS := range rSchema.Body.Attributes {
 			val := req.ProposedNewState.GetAttr(name)
 			if attrS.Computed && val.IsNull() {
 				val = cty.UnknownVal(attrS.Type)
 			}
 			plannedVals[name] = val
 		}
-		for name := range rSchema.BlockTypes {
+		for name := range rSchema.Body.BlockTypes {
 			// For simplicity's sake we just copy the block attributes over
 			// verbatim, since this package's mock providers are all relatively
 			// simple -- we're testing the backend, not esoteric provider features.
@@ -98,7 +99,6 @@ func TestLocalProvider(t *testing.T, b *Local, name string, schema providers.Pro
 	}
 
 	return p
-
 }
 
 // TestLocalSingleState is a backend implementation that wraps Local

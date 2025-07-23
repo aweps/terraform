@@ -34,6 +34,7 @@ func ConfigSchemaToProto(b *configschema.Block) *proto.Schema_Block {
 			Required:        a.Required,
 			Sensitive:       a.Sensitive,
 			Deprecated:      a.Deprecated,
+			WriteOnly:       a.WriteOnly,
 		}
 
 		ty, err := json.Marshal(a.Type)
@@ -89,11 +90,100 @@ func protoSchemaNestedBlock(name string, b *configschema.NestedBlock) *proto.Sch
 }
 
 // ProtoToProviderSchema takes a proto.Schema and converts it to a providers.Schema.
-func ProtoToProviderSchema(s *proto.Schema) providers.Schema {
-	return providers.Schema{
+// It takes an optional resource identity schema for resources that support identity.
+func ProtoToProviderSchema(s *proto.Schema, id *proto.ResourceIdentitySchema) providers.Schema {
+	schema := providers.Schema{
 		Version: s.Version,
-		Block:   ProtoToConfigSchema(s.Block),
+		Body:    ProtoToConfigSchema(s.Block),
 	}
+
+	if id != nil {
+		schema.IdentityVersion = id.Version
+		schema.Identity = ProtoToIdentitySchema(id.IdentityAttributes)
+	}
+
+	return schema
+}
+
+func ProtoToExecutionOrder(s proto.ActionSchema_Lifecycle_ExecutionOrder) providers.ExecutionOrder {
+	switch s {
+	case proto.ActionSchema_Lifecycle_INVALID:
+		return providers.ExecutionOrderInvalid
+	case proto.ActionSchema_Lifecycle_BEFORE:
+		return providers.ExecutionOrderBefore
+	case proto.ActionSchema_Lifecycle_AFTER:
+		return providers.ExecutionOrderAfter
+	default:
+		panic("Unknown Execution Order, expected Invalid, Before, or After")
+	}
+}
+
+func ExecutionOrderToProto(s providers.ExecutionOrder) proto.ActionSchema_Lifecycle_ExecutionOrder {
+	switch s {
+	case providers.ExecutionOrderInvalid:
+		return proto.ActionSchema_Lifecycle_INVALID
+	case providers.ExecutionOrderBefore:
+		return proto.ActionSchema_Lifecycle_BEFORE
+	case providers.ExecutionOrderAfter:
+		return proto.ActionSchema_Lifecycle_AFTER
+	default:
+		panic("Unknown Execution Order, expected Invalid, Before, or After")
+	}
+}
+
+func ProtoToLinkedResource(lr *proto.ActionSchema_LinkedResource) providers.LinkedResourceSchema {
+	if lr == nil {
+		return providers.LinkedResourceSchema{}
+	}
+
+	return providers.LinkedResourceSchema{
+		TypeName: lr.TypeName,
+	}
+}
+
+func LinkedResourceToProto(lr providers.LinkedResourceSchema) *proto.ActionSchema_LinkedResource {
+	return &proto.ActionSchema_LinkedResource{
+		TypeName: lr.TypeName,
+	}
+}
+
+func ProtoToLinkedResources(lrs []*proto.ActionSchema_LinkedResource) []providers.LinkedResourceSchema {
+	linkedResources := make([]providers.LinkedResourceSchema, len(lrs))
+	for i, lr := range lrs {
+		linkedResources[i] = ProtoToLinkedResource(lr)
+	}
+	return linkedResources
+}
+
+func LinkedResourcesToProto(lrs []providers.LinkedResourceSchema) []*proto.ActionSchema_LinkedResource {
+	linkedResources := make([]*proto.ActionSchema_LinkedResource, len(lrs))
+	for i, lr := range lrs {
+		linkedResources[i] = LinkedResourceToProto(lr)
+	}
+	return linkedResources
+}
+
+func ProtoToActionSchema(s *proto.ActionSchema) providers.ActionSchema {
+	schema := providers.ActionSchema{
+		ConfigSchema: ProtoToConfigSchema(s.Schema.Block),
+	}
+
+	switch t := s.Type.(type) {
+	case *proto.ActionSchema_Unlinked_:
+		schema.Unlinked = &providers.UnlinkedAction{}
+	case *proto.ActionSchema_Lifecycle_:
+		schema.Lifecycle = &providers.LifecycleAction{
+			Executes:       ProtoToExecutionOrder(t.Lifecycle.Executes),
+			LinkedResource: ProtoToLinkedResource(t.Lifecycle.LinkedResource),
+		}
+	case *proto.ActionSchema_Linked_:
+		schema.Linked = &providers.LinkedAction{
+			LinkedResources: ProtoToLinkedResources(t.Linked.LinkedResources),
+		}
+	default:
+		panic("Unknown Action Type, expected schema to contain either Unlinked, Liefecycle, or Linked")
+	}
+	return schema
 }
 
 // ProtoToConfigSchema takes the GetSchcema_Block from a grpc response and converts it
@@ -117,6 +207,7 @@ func ProtoToConfigSchema(b *proto.Schema_Block) *configschema.Block {
 			Computed:        a.Computed,
 			Sensitive:       a.Sensitive,
 			Deprecated:      a.Deprecated,
+			WriteOnly:       a.WriteOnly,
 		}
 
 		if err := json.Unmarshal(a.Type, &attr.Type); err != nil {
@@ -185,4 +276,55 @@ func sortedKeys(m interface{}) []string {
 
 	sort.Strings(keys)
 	return keys
+}
+
+func ProtoToIdentitySchema(attributes []*proto.ResourceIdentitySchema_IdentityAttribute) *configschema.Object {
+	obj := &configschema.Object{
+		Attributes: make(map[string]*configschema.Attribute),
+		Nesting:    configschema.NestingSingle,
+	}
+
+	for _, a := range attributes {
+		attr := &configschema.Attribute{
+			Description: a.Description,
+			Required:    a.RequiredForImport,
+			Optional:    a.OptionalForImport,
+		}
+
+		if err := json.Unmarshal(a.Type, &attr.Type); err != nil {
+			panic(err)
+		}
+
+		obj.Attributes[a.Name] = attr
+	}
+
+	return obj
+}
+
+func ResourceIdentitySchemaToProto(b providers.IdentitySchema) *proto.ResourceIdentitySchema {
+	attrs := []*proto.ResourceIdentitySchema_IdentityAttribute{}
+	for _, name := range sortedKeys(b.Body.Attributes) {
+		a := b.Body.Attributes[name]
+
+		attr := &proto.ResourceIdentitySchema_IdentityAttribute{
+			Name:              name,
+			Description:       a.Description,
+			RequiredForImport: a.Required,
+			OptionalForImport: a.Optional,
+		}
+
+		ty, err := json.Marshal(a.Type)
+		if err != nil {
+			panic(err)
+		}
+
+		attr.Type = ty
+
+		attrs = append(attrs, attr)
+	}
+
+	return &proto.ResourceIdentitySchema{
+		Version:            b.Version,
+		IdentityAttributes: attrs,
+	}
 }

@@ -48,7 +48,7 @@ func TestManagedDataValidate(t *testing.T) {
 
 func TestManagedDataUpgradeState(t *testing.T) {
 	schema := dataStoreResourceSchema()
-	ty := schema.Block.ImpliedType()
+	ty := schema.Body.ImpliedType()
 
 	state := cty.ObjectVal(map[string]cty.Value{
 		"input":  cty.StringVal("input"),
@@ -104,7 +104,7 @@ func TestManagedDataRead(t *testing.T) {
 }
 
 func TestManagedDataPlan(t *testing.T) {
-	schema := dataStoreResourceSchema().Block
+	schema := dataStoreResourceSchema().Body
 	ty := schema.ImpliedType()
 
 	for name, tc := range map[string]struct {
@@ -256,7 +256,7 @@ func TestManagedDataApply(t *testing.T) {
 		testUUIDHook = nil
 	}()
 
-	schema := dataStoreResourceSchema().Block
+	schema := dataStoreResourceSchema().Body
 	ty := schema.ImpliedType()
 
 	for name, tc := range map[string]struct {
@@ -381,5 +381,110 @@ func TestManagedDataApply(t *testing.T) {
 				t.Errorf("expected:\n%#v\ngot:\n%#v\n", tc.state, resp.NewState)
 			}
 		})
+	}
+}
+
+func TestMoveDataStoreResourceState_Id(t *testing.T) {
+	t.Parallel()
+
+	nullResourceStateValue := cty.ObjectVal(map[string]cty.Value{
+		"id":       cty.StringVal("test"),
+		"triggers": cty.NullVal(cty.Map(cty.String)),
+	})
+	nullResourceStateJSON, err := ctyjson.Marshal(nullResourceStateValue, nullResourceStateValue.Type())
+
+	if err != nil {
+		t.Fatalf("failed to marshal null resource state: %s", err)
+	}
+
+	req := providers.MoveResourceStateRequest{
+		SourceProviderAddress: "registry.terraform.io/hashicorp/null",
+		SourceStateJSON:       nullResourceStateJSON,
+		SourceTypeName:        "null_resource",
+		TargetTypeName:        "terraform_data",
+	}
+	resp := moveDataStoreResourceState(req)
+
+	if resp.Diagnostics.HasErrors() {
+		t.Errorf("unexpected diagnostics: %s", resp.Diagnostics.Err())
+	}
+
+	expectedTargetState := cty.ObjectVal(map[string]cty.Value{
+		"id":               cty.StringVal("test"),
+		"input":            cty.NullVal(cty.DynamicPseudoType),
+		"output":           cty.NullVal(cty.DynamicPseudoType),
+		"triggers_replace": cty.NullVal(cty.DynamicPseudoType),
+	})
+
+	if !resp.TargetState.RawEquals(expectedTargetState) {
+		t.Errorf("expected state was:\n%#v\ngot state is:\n%#v\n", expectedTargetState, resp.TargetState)
+	}
+}
+
+func TestMoveResourceState_SourceProviderAddress(t *testing.T) {
+	t.Parallel()
+
+	req := providers.MoveResourceStateRequest{
+		SourceProviderAddress: "registry.terraform.io/examplecorp/null",
+	}
+	resp := moveDataStoreResourceState(req)
+
+	if !resp.Diagnostics.HasErrors() {
+		t.Fatal("expected diagnostics")
+	}
+}
+
+func TestMoveResourceState_SourceTypeName(t *testing.T) {
+	t.Parallel()
+
+	req := providers.MoveResourceStateRequest{
+		SourceProviderAddress: "registry.terraform.io/hashicorp/null",
+		SourceTypeName:        "null_data_source",
+	}
+	resp := moveDataStoreResourceState(req)
+
+	if !resp.Diagnostics.HasErrors() {
+		t.Fatal("expected diagnostics")
+	}
+}
+
+func TestMoveDataStoreResourceState_Triggers(t *testing.T) {
+	t.Parallel()
+
+	nullResourceStateValue := cty.ObjectVal(map[string]cty.Value{
+		"id": cty.StringVal("test"),
+		"triggers": cty.MapVal(map[string]cty.Value{
+			"testkey": cty.StringVal("testvalue"),
+		}),
+	})
+	nullResourceStateJSON, err := ctyjson.Marshal(nullResourceStateValue, nullResourceStateValue.Type())
+
+	if err != nil {
+		t.Fatalf("failed to marshal null resource state: %s", err)
+	}
+
+	req := providers.MoveResourceStateRequest{
+		SourceProviderAddress: "registry.terraform.io/hashicorp/null",
+		SourceStateJSON:       nullResourceStateJSON,
+		SourceTypeName:        "null_resource",
+		TargetTypeName:        "terraform_data",
+	}
+	resp := moveDataStoreResourceState(req)
+
+	if resp.Diagnostics.HasErrors() {
+		t.Errorf("unexpected diagnostics: %s", resp.Diagnostics.Err())
+	}
+
+	expectedTargetState := cty.ObjectVal(map[string]cty.Value{
+		"id":     cty.StringVal("test"),
+		"input":  cty.NullVal(cty.DynamicPseudoType),
+		"output": cty.NullVal(cty.DynamicPseudoType),
+		"triggers_replace": cty.ObjectVal(map[string]cty.Value{
+			"testkey": cty.StringVal("testvalue"),
+		}),
+	})
+
+	if !resp.TargetState.RawEquals(expectedTargetState) {
+		t.Errorf("expected state was:\n%#v\ngot state is:\n%#v\n", expectedTargetState, resp.TargetState)
 	}
 }

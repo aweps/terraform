@@ -27,6 +27,10 @@ type BasicGraphBuilder struct {
 	Steps []GraphTransformer
 	// Optional name to add to the graph debug log
 	Name string
+
+	// SkipGraphValidation indicates whether the graph validation (enabled by default)
+	// should be skipped after the graph is built.
+	SkipGraphValidation bool
 }
 
 func (b *BasicGraphBuilder) Build(path addrs.ModuleInstance) (*Graph, tfdiags.Diagnostics) {
@@ -41,21 +45,39 @@ func (b *BasicGraphBuilder) Build(path addrs.ModuleInstance) (*Graph, tfdiags.Di
 		log.Printf("[TRACE] Executing graph transform %T", step)
 
 		err := step.Transform(g)
-		if thisStepStr := g.StringWithNodeTypes(); thisStepStr != lastStepStr {
-			log.Printf("[TRACE] Completed graph transform %T with new graph:\n%s  ------", step, logging.Indent(thisStepStr))
-			lastStepStr = thisStepStr
-		} else {
-			log.Printf("[TRACE] Completed graph transform %T (no changes)", step)
+
+		if logging.GraphTrace {
+			if thisStepStr := g.StringWithNodeTypes(); thisStepStr != lastStepStr {
+				log.Printf("[TRACE] Completed graph transform %T with new graph:\n%s  ------", step, logging.Indent(thisStepStr))
+				lastStepStr = thisStepStr
+			} else {
+				log.Printf("[TRACE] Completed graph transform %T (no changes)", step)
+			}
 		}
 
 		if err != nil {
 			if nf, isNF := err.(tfdiags.NonFatalError); isNF {
 				diags = diags.Append(nf.Diagnostics)
+			} else if diag, isDiag := err.(tfdiags.DiagnosticsAsError); isDiag {
+				diags = diags.Append(diag.Diagnostics)
+				return g, diags
 			} else {
 				diags = diags.Append(err)
 				return g, diags
 			}
 		}
+	}
+
+	if !logging.GraphTrace {
+		// print the graph at least once for normal trace logs
+		log.Printf("[TRACE] Completed graph transform:\n%s  ------", g.StringWithNodeTypes())
+	}
+
+	// Return early if the graph validation is skipped
+	// This behavior is currently only used by the graph command
+	// which only wants to display the dot representation of the graph
+	if b.SkipGraphValidation {
+		return g, diags
 	}
 
 	if err := g.Validate(); err != nil {

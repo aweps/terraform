@@ -15,7 +15,6 @@ import (
 
 	"github.com/hashicorp/terraform/internal/addrs"
 	"github.com/hashicorp/terraform/internal/checks"
-	"github.com/hashicorp/terraform/internal/lang/marks"
 	"github.com/hashicorp/terraform/internal/states"
 	"github.com/hashicorp/terraform/internal/tfdiags"
 )
@@ -137,8 +136,9 @@ func prepareStateV4(sV4 *stateV4) (*File, tfdiags.Diagnostics) {
 			instAddr := rAddr.Instance(key)
 
 			obj := &states.ResourceInstanceObjectSrc{
-				SchemaVersion:       isV4.SchemaVersion,
-				CreateBeforeDestroy: isV4.CreateBeforeDestroy,
+				SchemaVersion:         isV4.SchemaVersion,
+				CreateBeforeDestroy:   isV4.CreateBeforeDestroy,
+				IdentitySchemaVersion: isV4.IdentitySchemaVersion,
 			}
 
 			{
@@ -157,6 +157,10 @@ func prepareStateV4(sV4 *stateV4) (*File, tfdiags.Diagnostics) {
 				}
 			}
 
+			if isV4.IdentityRaw != nil {
+				obj.IdentityJSON = isV4.IdentityRaw
+			}
+
 			// Sensitive paths
 			if isV4.AttributeSensitivePaths != nil {
 				paths, pathsDiags := unmarshalPaths([]byte(isV4.AttributeSensitivePaths))
@@ -164,15 +168,7 @@ func prepareStateV4(sV4 *stateV4) (*File, tfdiags.Diagnostics) {
 				if pathsDiags.HasErrors() {
 					continue
 				}
-
-				var pvm []cty.PathValueMarks
-				for _, path := range paths {
-					pvm = append(pvm, cty.PathValueMarks{
-						Path:  path,
-						Marks: cty.NewValueMarks(marks.Sensitive),
-					})
-				}
-				obj.AttrSensitivePaths = pvm
+				obj.AttrSensitivePaths = paths
 			}
 
 			{
@@ -257,7 +253,7 @@ func prepareStateV4(sV4 *stateV4) (*File, tfdiags.Diagnostics) {
 	}
 
 	// The root module is special in that we persist its attributes and thus
-	// need to reload them now. (For descendent modules we just re-calculate
+	// need to reload them now. (For descendant modules we just re-calculate
 	// them based on the latest configuration on each run.)
 	{
 		for name, fos := range sV4.RootOutputs {
@@ -488,14 +484,8 @@ func appendInstanceObjectStateV4(rs *states.Resource, is *states.ResourceInstanc
 		}
 	}
 
-	// Extract paths from path value marks
-	var paths []cty.Path
-	for _, vm := range obj.AttrSensitivePaths {
-		paths = append(paths, vm.Path)
-	}
-
 	// Marshal paths to JSON
-	attributeSensitivePaths, pathsDiags := marshalPaths(paths)
+	attributeSensitivePaths, pathsDiags := marshalPaths(obj.AttrSensitivePaths)
 	diags = diags.Append(pathsDiags)
 
 	return append(isV4s, instanceObjectStateV4{
@@ -509,6 +499,8 @@ func appendInstanceObjectStateV4(rs *states.Resource, is *states.ResourceInstanc
 		PrivateRaw:              privateRaw,
 		Dependencies:            deps,
 		CreateBeforeDestroy:     obj.CreateBeforeDestroy,
+		IdentitySchemaVersion:   obj.IdentitySchemaVersion,
+		IdentityRaw:             obj.IdentityJSON,
 	}), diags
 }
 
@@ -717,6 +709,9 @@ type instanceObjectStateV4 struct {
 	AttributesFlat          map[string]string `json:"attributes_flat,omitempty"`
 	AttributeSensitivePaths json.RawMessage   `json:"sensitive_attributes,omitempty"`
 
+	IdentitySchemaVersion uint64          `json:"identity_schema_version"`
+	IdentityRaw           json.RawMessage `json:"identity,omitempty"`
+
 	PrivateRaw []byte `json:"private,omitempty"`
 
 	Dependencies []string `json:"dependencies,omitempty"`
@@ -825,6 +820,9 @@ func unmarshalPaths(buf []byte) ([]cty.Path, tfdiags.Diagnostics) {
 		))
 	}
 
+	if len(jsonPaths) == 0 {
+		return nil, diags
+	}
 	paths := make([]cty.Path, 0, len(jsonPaths))
 
 unmarshalOuter:
